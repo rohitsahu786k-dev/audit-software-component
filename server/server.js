@@ -3,6 +3,7 @@ require('dotenv').config({ path: require('path').resolve(__dirname, '../.env') }
 
 const express = require('express');
 const cors = require('cors');
+const fs = require('fs');
 const path = require('path');
 const cron = require('node-cron');
 const { getCollection, shutdown } = require('./lib/mongo');
@@ -64,6 +65,22 @@ app.use('/api/media', mediaRoutes);
 
 // ── 404 ─────────────────────────────────────────────
 app.use('/api', (_req, res) => res.status(404).json({ ok: false, error: 'Not found' }));
+
+// ── STATIC CLIENT ───────────────────────────────────
+// When client/dist exists (i.e. a deployed build), one service serves both the API
+// and the SPA. apiFetch in client/src/utils/api.js uses relative /api paths, so
+// same-origin serving means no CORS or API-base config is needed in the browser.
+// In local dev the build is absent and Vite serves :5173 with its own /api proxy.
+const CLIENT_DIST = path.resolve(__dirname, '../client/dist');
+if (fs.existsSync(path.join(CLIENT_DIST, 'index.html'))) {
+  app.use(express.static(CLIENT_DIST));
+  // Client-side routes (react-router) must fall back to index.html. /api never
+  // reaches here — the 404 handler above already terminated those requests.
+  app.get(/^\/(?!api\/).*/, (_req, res) => res.sendFile(path.join(CLIENT_DIST, 'index.html')));
+  console.log('[AuditPro] Serving client build from client/dist');
+} else {
+  console.log('[AuditPro] No client build found — API only (run "npm run build:client" to serve the SPA)');
+}
 
 // ── ERROR HANDLER ────────────────────────────────────
 app.use((err, _req, res, _next) => {

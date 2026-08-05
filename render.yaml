@@ -1,0 +1,77 @@
+# Render blueprint for OnePWS AuditPro.
+#
+# ONE web service serves both the Express API and the built React SPA, because
+# client/src/utils/api.js calls relative /api paths — same-origin means no CORS
+# or API-base wiring in the browser.
+#
+# PLAN: do NOT use the free tier. server.js schedules the daily CAPA reminder
+# cron with node-cron, which only fires while the process is alive. Render's free
+# instances sleep after inactivity, so reminders would be silently skipped.
+#
+# Secrets are marked `sync: false` — Render will prompt for them on first deploy
+# and they are never stored in this repo.
+
+services:
+  - type: web
+    name: onepws-auditpro
+    runtime: node
+    plan: starter
+    region: singapore
+    branch: main
+    buildCommand: npm run build:render
+    startCommand: npm start
+    healthCheckPath: /api/health
+    autoDeployTrigger: commit
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: NODE_ENV
+        value: production
+
+      # ── Database (required) ──
+      - key: MONGODB_URI
+        sync: false
+      - key: MONGODB_DB
+        value: onepws_audit
+
+      # ── Auth (required) ──
+      # Without this, AUTH_SECRET is derived from MONGODB_DB (middleware/auth.js),
+      # which is guessable. Use Render's "Generate" button for a random value.
+      - key: AUTH_SECRET
+        generateValue: true
+      - key: AUTH_TOKEN_TTL_MS
+        value: "604800000"
+
+      # ── SMTP / Gmail (required for CAPA reminders + password reset) ──
+      - key: SMTP_HOST
+        value: smtp.gmail.com
+      - key: SMTP_PORT
+        value: "465"
+      - key: SMTP_SECURE
+        value: "true"
+      - key: SMTP_USER
+        sync: false
+      - key: SMTP_PASS
+        sync: false
+      - key: SMTP_FROM
+        sync: false
+
+      # ── Email automation ──
+      - key: EMAIL_AUTOMATION
+        value: "true"
+      - key: EMAIL_CRON
+        value: 0 9 * * *
+      - key: EMAIL_CRON_TZ
+        value: Asia/Kolkata
+      - key: EMAIL_REMINDER_WINDOW_DAYS
+        value: "2"
+
+      # ── Media uploads (required for the Media page) ──
+      - key: CLOUDINARY_URL
+        sync: false
+
+      # ── Optional ──
+      # Leave ALLOWED_ORIGINS unset for same-origin serving; set it only if you
+      # later host the client on a separate domain.
+      - key: APP_VERSION
+        value: "2026-07-02"
