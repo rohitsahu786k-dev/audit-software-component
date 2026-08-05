@@ -1,80 +1,91 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { useApp } from '../context/AppContext';
-import { Card, EmptyState } from '../components/UI';
-import { fmtDate, genId } from '../utils/helpers';
-import { Icon } from '../components/UI';
+import { Card, Badge, Icon } from '../components/UI';
+import { SEV_BADGE, SEV_LABEL, showToast } from '../utils/helpers';
 
 export default function Learnings() {
-  const { getLearnings, writeSyncKey, currentUser } = useApp();
-  const [newLearning, setNewLearning] = useState('');
-  const [adding, setAdding] = useState(false);
-
+  const { getLearnings, getDepts, writeSyncKey, currentUser, setPageAction } = useApp();
   const learnings = getLearnings();
+  const depts = getDepts();
+  const role = currentUser?.role;
+
+  const [search, setSearch] = useState('');
+  const [form, setForm] = useState({ title: '', dept: '', sev: 'major', clause: '', rc: '', pa: '', repeat: false, crossDept: false });
+  const titleInputRef = useRef(null);
+
+  useEffect(() => {
+    setPageAction(() => () => { titleInputRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' }); titleInputRef.current?.focus(); });
+    return () => setPageAction(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const filtered = useMemo(() => {
+    const q = search.toLowerCase().trim();
+    if (!q) return learnings;
+    return learnings.filter(l => [l.title, l.rc, l.pa, l.clause].join(' ').toLowerCase().includes(q));
+  }, [learnings, search]);
 
   const addLearning = () => {
-    if (!newLearning.trim()) return;
-    const current = getLearnings();
-    const updated = [
-      ...current,
-      {
-        id: genId('learn'),
-        text: newLearning.trim(),
-        date: new Date().toISOString(),
-        by: currentUser?.loginId || 'auditor',
-      }
-    ];
-    writeSyncKey('ap_learns', updated, currentUser?.loginId);
-    setNewLearning('');
-    setAdding(false);
+    if (!form.title.trim()) { showToast('Title required'); return; }
+    const item = { id: 'l' + Date.now(), title: form.title.trim(), dept: form.dept, sev: form.sev, clause: form.clause, rc: form.rc, pa: form.pa, repeat: form.repeat, crossDept: form.crossDept };
+    writeSyncKey('ap_learns', [item, ...getLearnings()], currentUser?.loginId);
+    setForm({ title: '', dept: '', sev: 'major', clause: '', rc: '', pa: '', repeat: false, crossDept: false });
+    showToast('Learning saved!');
+  };
+
+  const delLearning = (id) => { writeSyncKey('ap_learns', getLearnings().filter(x => x.id !== id), currentUser?.loginId); showToast('Deleted'); };
+
+  const exportExcel = () => {
+    if (!window.XLSX) { showToast('Excel loading...'); return; }
+    const XLSX = window.XLSX;
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(learnings.map(l => ({ Title: l.title, Dept: l.dept || 'All', Clause: l.clause, Severity: SEV_LABEL[l.sev], 'Root Cause': l.rc, 'Preventive Action': l.pa }))), 'Learnings');
+    XLSX.writeFile(wb, `OnePWS_Learnings_${Date.now()}.xlsx`);
+    showToast('Exported!');
   };
 
   return (
-    <div className="space-y-3">
-      <div className="flex justify-between items-center">
-        <h2 className="text-sm font-bold" style={{ color: 'var(--text2)' }}>AI Compliance Knowledge Base</h2>
-        {!adding && (
-          <button className="btn btn-brand btn-sm" onClick={() => setAdding(true)}>
-            <Icon name="plus" /> Add Learning
-          </button>
-        )}
-      </div>
-
-      {adding && (
-        <Card title="New Knowledge Entry">
-          <div className="space-y-3">
-            <textarea
-              value={newLearning}
-              onChange={e => setNewLearning(e.target.value)}
-              placeholder="E.g. Calibration records for digital calipers must include temperature corrections..."
-              style={{ height: 70, resize: 'none' }}
-            />
-            <div className="flex gap-2">
-              <button className="btn btn-ghost btn-sm" onClick={() => setAdding(false)}>Cancel</button>
-              <button className="btn btn-primary btn-sm" onClick={addLearning}>Save entry</button>
-            </div>
-          </div>
-        </Card>
-      )}
-
-      <Card>
-        {learnings.length === 0 ? (
-          <EmptyState icon="lightbulb" title="No learnings recorded" subtitle="AI suggestions and lessons learned will appear here." />
-        ) : (
-          <div className="space-y-3">
-            {learnings.map(item => (
-              <div key={item.id} className="p-3 rounded-lg border flex gap-3 items-start" style={{ borderColor: 'var(--border)', background: 'var(--bg3)' }}>
-                <Icon name="lightbulb" className="text-[var(--amber)] flex-shrink-0 mt-0.5" />
-                <div>
-                  <div className="text-xs" style={{ color: 'var(--text2)' }}>{item.text}</div>
-                  <div className="text-[10px] mt-2 flex gap-3" style={{ color: 'var(--text3)' }}>
-                    <span>By: {item.by}</span>
-                    <span>Added: {fmtDate(item.date)}</span>
-                  </div>
-                </div>
+    <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+      {/* Repository */}
+      <Card title={`Learnings Repository (${learnings.length})`}>
+        <div className="mb-2"><label className="form-label">Search</label><input placeholder="calibration, traceability..." value={search} onChange={e => setSearch(e.target.value)} /></div>
+        <div className="space-y-2">
+          {filtered.length === 0 ? (
+            <div className="text-[11px] text-center py-3" style={{ color: 'var(--text3)' }}>No learnings yet</div>
+          ) : filtered.map(l => (
+            <div key={l.id} className={`finding-card ${l.sev}`}>
+              <div className="flex justify-between items-start"><span className="font-bold text-xs">{l.title}</span><Badge type={SEV_BADGE[l.sev] || 'b-gray'}>{SEV_LABEL[l.sev] || l.sev}</Badge></div>
+              <div className="text-[10px] mt-1" style={{ color: 'var(--text3)' }}>{l.dept || 'All'} · {l.clause}</div>
+              <div className="text-[11px] mt-1" style={{ color: 'var(--text2)' }}><strong>RC:</strong> {l.rc}</div>
+              <div className="text-[11px]" style={{ color: 'var(--text2)' }}><strong>PA:</strong> {l.pa}</div>
+              <div className="flex gap-2 mt-2 items-center">
+                {l.repeat && <Badge type="b-purple">Repeat</Badge>}
+                {l.crossDept && <Badge type="b-blue">X-dept</Badge>}
+                {role === 'admin' && <button className="btn btn-danger btn-icon btn-sm ml-auto" onClick={() => delLearning(l.id)}><Icon name="trash-2" /></button>}
               </div>
-            ))}
+            </div>
+          ))}
+        </div>
+      </Card>
+
+      {/* Add form */}
+      <Card title="Add New Learning">
+        <div className="flex flex-col gap-2">
+          <div><label className="form-label">Title *</label><input ref={titleInputRef} placeholder="Learning title..." value={form.title} onChange={e => setForm(p => ({ ...p, title: e.target.value }))} /></div>
+          <div className="grid grid-cols-2 gap-2">
+            <div><label className="form-label">Dept</label><select value={form.dept} onChange={e => setForm(p => ({ ...p, dept: e.target.value }))}><option value="">All</option>{depts.map(d => <option key={d.code} value={d.code}>{d.name}</option>)}</select></div>
+            <div><label className="form-label">Severity</label><select value={form.sev} onChange={e => setForm(p => ({ ...p, sev: e.target.value }))}><option value="critical">Critical</option><option value="major">Major</option><option value="minor">Minor</option><option value="obs">Observation</option></select></div>
           </div>
-        )}
+          <div><label className="form-label">Clause</label><input placeholder="§8.5.2" value={form.clause} onChange={e => setForm(p => ({ ...p, clause: e.target.value }))} /></div>
+          <div><label className="form-label">Root Cause</label><textarea style={{ height: 52, resize: 'none' }} placeholder="Describe root cause..." value={form.rc} onChange={e => setForm(p => ({ ...p, rc: e.target.value }))} /></div>
+          <div><label className="form-label">Preventive Action</label><textarea style={{ height: 52, resize: 'none' }} placeholder="What prevents recurrence?" value={form.pa} onChange={e => setForm(p => ({ ...p, pa: e.target.value }))} /></div>
+          <div className="flex gap-4 flex-wrap">
+            <label className="flex items-center gap-[5px] text-xs" style={{ cursor: 'pointer' }}><input type="checkbox" style={{ width: 'auto' }} checked={form.repeat} onChange={e => setForm(p => ({ ...p, repeat: e.target.checked }))} /> Repeat Issue</label>
+            <label className="flex items-center gap-[5px] text-xs" style={{ cursor: 'pointer' }}><input type="checkbox" style={{ width: 'auto' }} checked={form.crossDept} onChange={e => setForm(p => ({ ...p, crossDept: e.target.checked }))} /> Cross-dept</label>
+          </div>
+          <button className="btn btn-brand w-full" onClick={addLearning}><Icon name="lightbulb" /> Save to Knowledge Base</button>
+          <button className="btn btn-ghost btn-sm w-full" onClick={exportExcel}><Icon name="table" /> Export Excel</button>
+        </div>
       </Card>
     </div>
   );

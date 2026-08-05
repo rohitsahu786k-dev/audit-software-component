@@ -7,6 +7,7 @@ import { Toast } from './components/UI';
 
 // Pages
 import Dashboard from './pages/Dashboard';
+import Analytics from './pages/Analytics';
 import Findings from './pages/Findings';
 import CAPA from './pages/CAPA';
 import Planning from './pages/Planning';
@@ -15,6 +16,7 @@ import Reports from './pages/Reports';
 import Learnings from './pages/Learnings';
 import Media from './pages/Media';
 import MasterData from './pages/MasterData';
+import EmailCenter from './pages/EmailCenter';
 import AdminPanel from './pages/AdminPanel';
 import MyTasks from './pages/MyTasks';
 import ManagerPanel from './pages/ManagerPanel';
@@ -24,13 +26,21 @@ import ImportData from './pages/ImportData';
 import Profile from './pages/Profile';
 
 export default function App() {
-  const { currentUser, currentPage, canAccess } = useApp();
+  const { currentUser, currentPage, canAccess, authChecked } = useApp();
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
   // Date filters passed from Topbar to active views
   const [dateFrom, setDateFrom] = useState('');
   const [dateTo, setDateTo] = useState('');
   const [appliedDate, setAppliedDate] = useState({ from: '', to: '' });
+
+  if (!authChecked) {
+    return (
+      <div className="flex items-center justify-center h-screen text-sm" style={{ color: 'var(--text3)' }}>
+        Loading…
+      </div>
+    );
+  }
 
   if (!currentUser) {
     return (
@@ -52,16 +62,18 @@ export default function App() {
     }
 
     switch (currentPage) {
-      case 'dashboard':     return <Dashboard />;
+      case 'dashboard':     return <Dashboard dateFrom={appliedDate.from} dateTo={appliedDate.to} />;
+      case 'analytics':     return <Analytics dateFrom={appliedDate.from} dateTo={appliedDate.to} />;
       case 'findings':      return <Findings dateFrom={appliedDate.from} dateTo={appliedDate.to} />;
-      case 'capa':          return <CAPA />;
+      case 'capa':          return <CAPA dateFrom={appliedDate.from} dateTo={appliedDate.to} />;
       case 'planning':      return <Planning />;
       case 'execution':     return <Execution />;
-      case 'reports':       return <Reports />;
+      case 'reports':       return <Reports dateFrom={appliedDate.from} dateTo={appliedDate.to} />;
       case 'learnings':     return <Learnings />;
       case 'media':         return <Media />;
-      case 'mastertracker': return <MasterTracker />;
+      case 'mastertracker': return <MasterTracker dateFrom={appliedDate.from} dateTo={appliedDate.to} />;
       case 'masterdata':    return <MasterData />;
+      case 'emailcenter':   return <EmailCenter />;
       case 'adminpanel':    return <AdminPanel />;
       case 'mytasks':       return <MyTasks />;
       case 'managerpanel':  return <ManagerPanel />;

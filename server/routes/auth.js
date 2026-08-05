@@ -112,8 +112,8 @@ router.post('/forgot-password', wrapAsync(async (req, res) => {
 router.post('/reset-password', wrapAsync(async (req, res) => {
   const identity = String((req.body && req.body.identity) || '').trim().toLowerCase();
   const otp = String((req.body && req.body.otp) || '').trim();
-  const password = String((req.body && req.body.password) || '');
-  if (!identity || !otp || !password) return res.status(400).json({ ok: false, error: 'Identity, OTP and new password are required' });
+  const password = String((req.body && req.body.password) || (req.body && req.body.newPassword) || '');
+  if (!identity || !otp || !password) return res.status(400).json({ ok: false, error: 'Identity, OTP and password are required' });
   if (password.length < 6) return res.status(400).json({ ok: false, error: 'Password must be at least 6 characters' });
   const { collection, users } = await getUsersRecord();
   const user = findUserByIdentity(users, identity);

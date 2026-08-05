@@ -1,7 +1,7 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useApp } from '../context/AppContext';
 import { Icon } from './UI';
-import { apiFetch, saveAuthToken } from '../utils/api';
+import { apiFetch } from '../utils/api';
 import { showToast } from '../utils/helpers';
 
 export default function Login() {

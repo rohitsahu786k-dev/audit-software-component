@@ -1,10 +1,42 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { useApp } from '../context/AppContext';
 import { Card } from '../components/UI';
-import { ROLE_LABELS } from '../utils/helpers';
+import { ROLE_LABELS, showToast } from '../utils/helpers';
+import { apiFetch } from '../utils/api';
 
 export default function Profile() {
-  const { currentUser } = useApp();
+  const { currentUser, setCurrentUser, getDepts } = useApp();
+  const depts = getDepts();
+  const [form, setForm] = useState({
+    name: currentUser?.name || '',
+    email: currentUser?.email || '',
+    dept: currentUser?.dept || '',
+    pw: '',
+    pw2: '',
+  });
+  const [saving, setSaving] = useState(false);
+
+  const save = async () => {
+    const name = form.name.trim();
+    const email = form.email.trim();
+    if (!name) { showToast('Name required'); return; }
+    if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { showToast('Valid email required'); return; }
+    if ((form.pw || form.pw2) && form.pw !== form.pw2) { showToast('Passwords do not match'); return; }
+    if (form.pw && form.pw.length < 6) { showToast('Password must be at least 6 characters'); return; }
+
+    setSaving(true);
+    const payload = { name, email, dept: form.dept };
+    if (form.pw) payload.password = form.pw;
+    try {
+      const data = await apiFetch('/api/auth/profile', { method: 'PUT', body: JSON.stringify(payload) });
+      setCurrentUser(data.user);
+      setForm(p => ({ ...p, pw: '', pw2: '' }));
+      showToast('Profile updated');
+    } catch (err) {
+      showToast('Update failed: ' + err.message);
+    }
+    setSaving(false);
+  };
 
   return (
     <div className="max-w-md space-y-3">
@@ -23,20 +55,26 @@ export default function Profile() {
             </div>
           </div>
 
-          <div className="space-y-2 text-xs">
-            <div className="flex justify-between">
-              <span style={{ color: 'var(--text3)' }}>Login ID:</span>
-              <span className="font-bold">{currentUser?.loginId}</span>
-            </div>
-            <div className="flex justify-between">
-              <span style={{ color: 'var(--text3)' }}>Email:</span>
-              <span className="font-bold">{currentUser?.email || 'N/A'}</span>
-            </div>
-            <div className="flex justify-between">
-              <span style={{ color: 'var(--text3)' }}>Assigned Department:</span>
-              <span className="font-bold">{currentUser?.dept || 'All'}</span>
+          <div className="grid grid-cols-2 gap-2">
+            <div><label className="form-label">Name</label><input value={form.name} onChange={e => setForm(p => ({ ...p, name: e.target.value }))} /></div>
+            <div><label className="form-label">Login ID</label><input value={currentUser?.loginId || ''} disabled /></div>
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            <div><label className="form-label">Role</label><input value={ROLE_LABELS[currentUser?.role] || currentUser?.role || ''} disabled /></div>
+            <div>
+              <label className="form-label">Department</label>
+              <select value={form.dept} onChange={e => setForm(p => ({ ...p, dept: e.target.value }))}>
+                <option value="">All</option>
+                {depts.map(d => <option key={d.code} value={d.code}>{d.name}</option>)}
+              </select>
             </div>
           </div>
+          <div><label className="form-label">Email</label><input type="email" value={form.email} onChange={e => setForm(p => ({ ...p, email: e.target.value }))} /></div>
+          <div className="grid grid-cols-2 gap-2">
+            <div><label className="form-label">New Password</label><input type="password" placeholder="Leave blank to keep old" value={form.pw} onChange={e => setForm(p => ({ ...p, pw: e.target.value }))} /></div>
+            <div><label className="form-label">Confirm Password</label><input type="password" value={form.pw2} onChange={e => setForm(p => ({ ...p, pw2: e.target.value }))} /></div>
+          </div>
+          <button className="btn btn-brand w-full" onClick={save} disabled={saving}>{saving ? 'Saving…' : 'Save Profile'}</button>
         </div>
       </Card>
     </div>

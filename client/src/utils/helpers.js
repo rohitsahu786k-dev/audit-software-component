@@ -1,22 +1,14 @@
-// ── LOCALSTORAGE HELPER ──────────────────────────────
-export const LS = {
-  get(k, d = null) { try { const v = localStorage.getItem(k); return v !== null ? JSON.parse(v) : d; } catch { return d; } },
-  set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} },
-  del(k) { try { localStorage.removeItem(k); } catch {} },
-  init(k, d) { if (localStorage.getItem(k) === null) LS.set(k, d); return LS.get(k); },
-};
-
 // ── SYNC KEYS ───────────────────────────────────────
+// Server-side whitelist of keys the /api/sync endpoints accept. All app data lives
+// only in MongoDB + in-memory React state — nothing here is cached in localStorage.
 export const SYNC_KEYS = [
   'ap_users','ap_depts','ap_auds','ap_cps','ap_finds','ap_learns',
   'ap_completed_audits','ap_planned_audits','ap_import_logs','ap_capa_due',
-  'ap_secs','ap_notifs','ap_stds','ap_permissions','ap_email_master',
+  'ap_notifs','ap_permissions','ap_email_master','ap_system_settings',
   'ap_email_templates','ap_email_logs','ap_required_cc_emails','ap_root_causes',
   'ap_media_library','ap_escalation_matrix','ap_audit_drafts','ap_local_storage_backup',
+  'ap_email_rules',
 ];
-
-export const LOCAL_STORAGE_BACKUP_KEY = 'ap_local_storage_backup';
-export const PENDING_SYNC_KEY = 'ap_pending_sync_queue';
 
 // ── SANITIZE ─────────────────────────────────────────
 export function sanitize(s) {
@@ -58,7 +50,11 @@ export function findingWorkflowStatus(f) {
   const status = String(f.status || '').toLowerCase();
   const capa = String(f.capaStatus || '').toLowerCase();
   if (status === 'closed' || capa === 'closed') return 'closed';
-  if (status === 'pending-closure' || capa === 'submitted') return 'pending-closure';
+  if (status === 'pending-closure') return 'pending-closure';
+  // capaStatus is consulted only when status carries no explicit workflow state.
+  // A rejected closure is reopened by moving status off 'pending-closure', so trusting
+  // a stale capaStatus:'submitted' here would pin it to "Submit For Review" forever.
+  if (capa === 'submitted' && (!status || status === 'open')) return 'pending-closure';
   return status || capa || 'open';
 }
 
@@ -81,14 +77,13 @@ export function normalizeFindingsData(data) {
 
 // ── PERMISSIONS ──────────────────────────────────────
 export const DEFAULT_PERMS = {
-  admin:   { ocp:1,dashboard:1,analytics:1,planning:1,execution:1,reports:1,findings:1,capa:1,learnings:1,media:1,masterdata:1,adminpanel:1,mytasks:1,managerpanel:1,mastertracker:1,importdata:1 },
-  auditor: { ocp:1,dashboard:1,analytics:1,planning:1,execution:1,reports:1,findings:1,capa:1,learnings:1,media:1,masterdata:0,adminpanel:0,mytasks:1,managerpanel:1,mastertracker:1,importdata:1 },
-  spoc:    { ocp:1,dashboard:1,analytics:1,planning:0,execution:0,reports:1,findings:1,capa:1,learnings:1,media:1,masterdata:0,adminpanel:0,mytasks:1,managerpanel:0,mastertracker:1,importdata:0 },
-  manager: { ocp:1,dashboard:1,analytics:1,planning:0,execution:0,reports:1,findings:1,capa:1,learnings:1,media:1,masterdata:0,adminpanel:0,mytasks:1,managerpanel:1,mastertracker:1,importdata:0 },
-  viewer:  { ocp:1,dashboard:1,analytics:1,planning:0,execution:0,reports:1,findings:1,capa:0,learnings:0,media:1,masterdata:0,adminpanel:0,mytasks:1,managerpanel:0,mastertracker:0,importdata:0 },
+  admin:   { ocp:1,dashboard:1,analytics:1,planning:1,execution:1,reports:1,findings:1,capa:1,learnings:1,media:1,masterdata:1,adminpanel:1,mytasks:1,managerpanel:1,mastertracker:1,importdata:1,emailcenter:1 },
+  auditor: { ocp:1,dashboard:1,analytics:1,planning:1,execution:1,reports:1,findings:1,capa:1,learnings:1,media:1,masterdata:0,adminpanel:0,mytasks:1,managerpanel:1,mastertracker:1,importdata:1,emailcenter:0 },
+  spoc:    { ocp:1,dashboard:1,analytics:1,planning:0,execution:0,reports:1,findings:1,capa:1,learnings:1,media:1,masterdata:0,adminpanel:0,mytasks:1,managerpanel:0,mastertracker:1,importdata:0,emailcenter:0 },
+  manager: { ocp:1,dashboard:1,analytics:1,planning:0,execution:0,reports:1,findings:1,capa:1,learnings:1,media:1,masterdata:0,adminpanel:0,mytasks:1,managerpanel:1,mastertracker:1,importdata:0,emailcenter:0 },
+  viewer:  { ocp:1,dashboard:1,analytics:1,planning:0,execution:0,reports:1,findings:1,capa:0,learnings:0,media:1,masterdata:0,adminpanel:0,mytasks:1,managerpanel:0,mastertracker:0,importdata:0,emailcenter:0 },
 };
-export function loadPermissions() {
-  const saved = LS.get('ap_permissions', null);
+export function loadPermissions(saved) {
   const roles = (saved && saved.roles) || saved || {};
   const base = JSON.parse(JSON.stringify(DEFAULT_PERMS));
   if (roles && typeof roles === 'object') {
@@ -103,19 +98,19 @@ export function loadPermissions() {
   return base;
 }
 
+// ── MEDIA / EVIDENCE FILE HELPERS ────────────────────
+export function mediaUrl(f) { return f ? (f.secure_url || f.url || f.data || '') : ''; }
+export function isImageMedia(f) {
+  const u = mediaUrl(f);
+  return !!(f && (f.resource_type === 'image' || f.file_type === 'image' || /^data:image/i.test(u) || /\.(png|jpe?g|webp|gif)(\?|#|$)/i.test(u)));
+}
+
 // ── GENERATE ID ──────────────────────────────────────
 export function genId(prefix = 'id') {
   return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
 }
 
 // ── MANAGER DEPT CODES ───────────────────────────────
-export function managerDeptCodes(user) {
-  if (!user) return [];
-  if (Array.isArray(user.managedDepts)) return user.managedDepts;
-  if (typeof user.managedDepts === 'string') return [user.managedDepts];
-  return user.dept ? [user.dept] : [];
-}
-
 // ── AUDIT SCORE ──────────────────────────────────────
 export function auditScore(findings = []) {
   let score = 100;

@@ -3,7 +3,7 @@
 const express = require('express');
 const router = express.Router();
 const { getCollection } = require('../lib/mongo');
-const { wrapAsync, requireAdmin } = require('../middleware/auth');
+const { wrapAsync, requireAdmin, requirePageAccess } = require('../middleware/auth');
 const {
   SYNC_KEYS, assertSyncKey, syncValuesEqual, sanitizeSyncValueForClient,
   mergeEmailLogs, mergeUsersForSync, mergeFindingsForSync,
@@ -12,6 +12,38 @@ const {
 
 const SYNC_READ_THROTTLE_MS = 20 * 1000;
 const recentSyncReads = new Map();
+
+// Per-key write authorization. NOTE: any new SYNC_KEY added to sync-helpers.js needs a
+// deliberate entry in exactly one of these — otherwise it silently falls through
+// enforceSyncWriteAccess with NO server-side restriction (open to any authenticated role).
+//
+// - ADMIN_ONLY: must always be the literal admin role, never grantable via the
+//   permissions matrix (granting them would let a non-admin escalate privilege, e.g. by
+//   editing ap_users/ap_permissions themselves).
+// - AUDITOR_OR_ADMIN: audit-integrity-critical data (checkpoints, planned/completed
+//   audits, import logs) — written by the Planning/Execution/Bulk-Import features, which
+//   are auditor+admin only by default.
+// - MASTERDATA_PAGE: gated by whatever the *configurable* masterdata page grant allows.
+const ADMIN_ONLY_SYNC_KEYS = new Set([
+  'ap_users', 'ap_permissions', 'ap_capa_due', 'ap_system_settings',
+  'ap_depts', 'ap_auds', 'ap_root_causes', 'ap_email_master', 'ap_email_templates',
+]);
+const AUDITOR_OR_ADMIN_SYNC_KEYS = new Set([
+  'ap_cps', 'ap_planned_audits', 'ap_completed_audits', 'ap_import_logs',
+]);
+const MASTERDATA_PAGE_SYNC_KEYS = new Set(['ap_required_cc_emails', 'ap_email_logs']);
+
+async function enforceSyncWriteAccess(req, key) {
+  if (ADMIN_ONLY_SYNC_KEYS.has(key)) return requireAdmin(req);
+  if (MASTERDATA_PAGE_SYNC_KEYS.has(key)) return requirePageAccess(req, 'masterdata');
+  if (AUDITOR_OR_ADMIN_SYNC_KEYS.has(key)) {
+    if (!req.authUser || !['admin', 'auditor'].includes(req.authUser.role)) {
+      const err = new Error('Only Master Admin or Auditor can modify this data');
+      err.statusCode = 403;
+      throw err;
+    }
+  }
+}
 
 function throttleSyncRead(req, res) {
   const isManifest = req.query && (req.query.manifest === '1' || req.query.meta === '1');
@@ -42,7 +74,7 @@ router.get('/', wrapAsync(async (req, res) => {
     return res.json({ ok: true, data, manifest: true });
   }
   const data = {};
-  rows.forEach(row => { data[row.key] = { value: sanitizeSyncValueForClient(row.key, row.value), updatedAt: row.updatedAt, updatedBy: row.updatedBy || 'system' }; });
+  rows.forEach(row => { data[row.key] = { value: sanitizeSyncValueForClient(row.key, row.value, req.authUser), updatedAt: row.updatedAt, updatedBy: row.updatedBy || 'system' }; });
   res.json({ ok: true, data });
 }));
 
@@ -52,7 +84,7 @@ router.get('/:key', wrapAsync(async (req, res) => {
   assertSyncKey(key);
   const collection = await getCollection();
   const row = await collection.findOne({ key });
-  res.json({ ok: true, key, value: row ? sanitizeSyncValueForClient(key, row.value) : null, updatedAt: row ? row.updatedAt : null });
+  res.json({ ok: true, key, value: row ? sanitizeSyncValueForClient(key, row.value, req.authUser) : null, updatedAt: row ? row.updatedAt : null });
 }));
 
 // PUT /api/sync/:key
@@ -64,7 +96,7 @@ router.put('/:key', wrapAsync(async (req, res) => {
   let incomingValue = req.body && Object.prototype.hasOwnProperty.call(req.body, 'value') ? req.body.value : null;
   let currentRow = null;
   const loadCurrent = async () => { if (!currentRow) currentRow = await collection.findOne({ key }); return currentRow; };
-  if (key === 'ap_users' || key === 'ap_permissions') requireAdmin(req);
+  await enforceSyncWriteAccess(req, key);
 
   if (key === 'ap_email_logs') {
     const current = await loadCurrent();
@@ -96,7 +128,7 @@ router.post('/bulk', wrapAsync(async (req, res) => {
   const items = (req.body && req.body.items) || {};
   const keys = Object.keys(items).filter(k => SYNC_KEYS.includes(k));
   if (!keys.length) return res.json({ ok: true, count: 0 });
-  if (keys.includes('ap_users') || keys.includes('ap_permissions')) requireAdmin(req);
+  for (const k of keys) await enforceSyncWriteAccess(req, k);
   const collection = await getCollection();
   const now = new Date();
   const currentRows = new Map();

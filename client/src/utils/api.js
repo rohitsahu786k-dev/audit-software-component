@@ -3,29 +3,31 @@ const AUDITPRO_CLIENT_VERSION = 'AuditPro-Web/2026-07-02-sync-guard-2';
 const AUTH_TOKEN_KEY = 'ap_auth_token';
 const AUTH_EXPIRES_KEY = 'ap_auth_expires_at';
 
+// Session-only: cleared automatically when the tab closes. No app data is ever
+// persisted to localStorage — only this auth token lives client-side, and only
+// for the lifetime of the tab, so a fresh MongoDB fetch is always the source of truth.
 export function getAuthToken() {
-  try { return localStorage.getItem(AUTH_TOKEN_KEY) || ''; } catch { return ''; }
+  try { return sessionStorage.getItem(AUTH_TOKEN_KEY) || ''; } catch { return ''; }
 }
 export function hasUsableAuthToken() {
   const token = getAuthToken();
   if (!token) return false;
   try {
-    const exp = Number(localStorage.getItem(AUTH_EXPIRES_KEY) || 0);
+    const exp = Number(sessionStorage.getItem(AUTH_EXPIRES_KEY) || 0);
     if (exp && Date.now() > exp) { clearAuthState(); return false; }
   } catch {}
   return true;
 }
 export function saveAuthToken(token, expiresInMs) {
   try {
-    localStorage.setItem(AUTH_TOKEN_KEY, token);
-    if (expiresInMs) localStorage.setItem(AUTH_EXPIRES_KEY, String(Date.now() + expiresInMs));
+    sessionStorage.setItem(AUTH_TOKEN_KEY, token);
+    if (expiresInMs) sessionStorage.setItem(AUTH_EXPIRES_KEY, String(Date.now() + expiresInMs));
   } catch {}
 }
 export function clearAuthState() {
   try {
-    localStorage.removeItem('ap_cu');
-    localStorage.removeItem(AUTH_TOKEN_KEY);
-    localStorage.removeItem(AUTH_EXPIRES_KEY);
+    sessionStorage.removeItem(AUTH_TOKEN_KEY);
+    sessionStorage.removeItem(AUTH_EXPIRES_KEY);
   } catch {}
 }
 

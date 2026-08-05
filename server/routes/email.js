@@ -2,18 +2,12 @@
 
 const express = require('express');
 const router = express.Router();
-const crypto = require('crypto');
 const { getCollection } = require('../lib/mongo');
 const { getMailer, parseRecipients, SMTP_FROM } = require('../lib/mailer');
-const { wrapAsync } = require('../middleware/auth');
+const { wrapAsync, requireAdmin } = require('../middleware/auth');
 const { mergeEmailLogs } = require('../lib/sync-helpers');
-
-const EMAIL_SEND_LOCK_PREFIX = '_email_send_lock_';
-const EMAIL_LOCK_PENDING_MS = 10 * 60 * 1000;
-
-function emailSendLockKey(input) {
-  return EMAIL_SEND_LOCK_PREFIX + crypto.createHash('sha256').update(String(input || '')).digest('hex');
-}
+const { emailSendLockKey, EMAIL_LOCK_PENDING_MS } = require('../lib/email-locks');
+const { runEmailAutomation } = require('../lib/email-engine');
 
 function normalizeEmailLockItems(input) {
   return (Array.isArray(input) ? input : []).map(item => {
@@ -32,7 +26,11 @@ router.get('/verify', wrapAsync(async (_req, res) => {
 }));
 
 // POST /api/email
+// Sends arbitrary subject/HTML to arbitrary recipients using the org's SMTP identity —
+// currently only used by the admin-only "Send Test" template action, so gate it the
+// same way. Relax deliberately (with its own access check) if a non-admin flow needs it.
 router.post('/', wrapAsync(async (req, res) => {
+  requireAdmin(req);
   const to = parseRecipients(req.body && req.body.to);
   const cc = parseRecipients(req.body && req.body.cc);
   const bcc = parseRecipients(req.body && req.body.bcc);
@@ -48,6 +46,17 @@ router.post('/', wrapAsync(async (req, res) => {
   const transport = getMailer();
   const info = await transport.sendMail({ from: SMTP_FROM, to, cc, bcc, subject, text, html, attachments });
   res.json({ ok: true, messageId: info.messageId, accepted: info.accepted });
+}));
+
+// POST /api/email/run
+// Admin-only manual trigger for the reminder engine that normally runs on the cron in server.js.
+// Pass { dryRun: true } to preview exactly who would be mailed without sending anything.
+router.post('/run', wrapAsync(async (req, res) => {
+  requireAdmin(req);
+  const dryRun = Boolean(req.body && req.body.dryRun);
+  const by = String((req.body && req.body.by) || 'manual');
+  const summary = await runEmailAutomation({ by, dryRun });
+  res.json(summary);
 }));
 
 // POST /api/email/log

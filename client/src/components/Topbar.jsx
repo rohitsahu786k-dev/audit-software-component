@@ -1,7 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useApp } from '../context/AppContext';
 import { Icon, SyncIndicator } from './UI';
-import { showToast } from '../utils/helpers';
 
 const PAGE_META = {
   dashboard:    { title: 'Executive Dashboard',       sub: 'Integrated QMS Portal · AS9100D',           act: '+ New Audit' },
@@ -14,6 +13,7 @@ const PAGE_META = {
   learnings:    { title: 'Learnings Repository',       sub: 'AI-assisted knowledge base',                act: '+ Add Learning' },
   media:        { title: 'Media Library',              sub: 'Cloudinary documents and evidence',         act: 'Refresh' },
   masterdata:   { title: 'Master Data Library',        sub: 'Single source of truth',                   act: '+ Add Record' },
+  emailcenter:  { title: 'Email Center',               sub: 'Automatic reminders · who gets what',       act: '' },
   adminpanel:   { title: 'Admin Panel',                sub: 'Master Admin Controls · Restricted',        act: '+ Add User' },
   mytasks:      { title: 'My Pending Tasks',           sub: 'Personalized task view',                   act: 'Refresh' },
   managerpanel: { title: 'Manager Console',            sub: 'Department NC review and escalation',       act: 'Send Summary' },
@@ -23,11 +23,12 @@ const PAGE_META = {
   profile:      { title: 'My Profile',                 sub: 'Account settings',                         act: '' },
 };
 
-export default function Topbar({ onMenuClick, onAction, dateFrom, dateTo, onDateFrom, onDateTo, onApplyDate, onClearDate }) {
-  const { currentUser, currentPage, syncStatus, notifications, logout, navigate } = useApp();
+export default function Topbar({ onMenuClick, dateFrom, dateTo, onDateFrom, onDateTo, onApplyDate, onClearDate }) {
+  const { currentPage, syncStatus, notifications: allNotifications, setNotifications, writeSyncKey, logout, pageAction, navigate, currentUser } = useApp();
   const [notifOpen, setNotifOpen] = useState(false);
   const notifRef = useRef(null);
   const meta = PAGE_META[currentPage] || { title: currentPage, sub: '', act: '' };
+  const notifications = allNotifications.filter(n => !Array.isArray(n.roles) || n.roles.includes(currentUser?.role));
   const unread = notifications.filter(n => !n.read).length;
 
   useEffect(() => {
@@ -38,7 +39,25 @@ export default function Topbar({ onMenuClick, onAction, dateFrom, dateTo, onDate
     return () => document.removeEventListener('mousedown', handleClick);
   }, []);
 
-  const showDateBar = ['findings', 'capa', 'mastertracker', 'analytics', 'reports'].includes(currentPage);
+  const showDateBar = ['dashboard', 'findings', 'capa', 'mastertracker', 'analytics', 'reports'].includes(currentPage);
+
+  // Mutate the full (unfiltered) list so notifications scoped to other roles aren't
+  // dropped — `notifications` above is filtered down to what this user can see.
+  const markAllRead = () => {
+    const visibleIds = new Set(notifications.map(n => n.id));
+    const updated = allNotifications.map(n => (visibleIds.has(n.id) ? { ...n, read: true } : n));
+    setNotifications(updated);
+    writeSyncKey('ap_notifs', updated);
+  };
+
+  const handleNotifClick = (n) => {
+    if (!n.read) {
+      const updated = allNotifications.map(x => (x.id === n.id ? { ...x, read: true } : x));
+      setNotifications(updated);
+      writeSyncKey('ap_notifs', updated);
+    }
+    if (n.link) { navigate(n.link); setNotifOpen(false); }
+  };
 
   return (
     <div className="topbar">
@@ -83,7 +102,7 @@ export default function Topbar({ onMenuClick, onAction, dateFrom, dateTo, onDate
             <div className="flex items-center justify-between px-3 py-[10px] border-b" style={{ borderColor: 'var(--border)' }}>
               <span className="font-bold text-sm">Notifications</span>
               <div className="flex gap-2">
-                <button className="btn btn-ghost btn-sm" onClick={() => setNotifOpen(false)}>Mark all read</button>
+                <button className="btn btn-ghost btn-sm" onClick={markAllRead}>Mark all read</button>
                 <button className="btn btn-ghost btn-icon btn-sm" onClick={() => setNotifOpen(false)}><Icon name="x" /></button>
               </div>
             </div>
@@ -91,7 +110,7 @@ export default function Topbar({ onMenuClick, onAction, dateFrom, dateTo, onDate
               {notifications.length === 0 ? (
                 <div className="text-xs text-center py-6" style={{ color: 'var(--text3)' }}>No notifications</div>
               ) : notifications.slice(0, 50).map((n, i) => (
-                <div key={n.id || i} className={`notif-item ${!n.read ? 'unread' : ''}`}>
+                <div key={n.id || i} className={`notif-item ${!n.read ? 'unread' : ''}`} style={{ cursor: n.link ? 'pointer' : 'default' }} onClick={() => handleNotifClick(n)}>
                   <div className="text-[11px] font-bold">{n.title || n.type}</div>
                   <div className="text-[11px] mt-[1px]" style={{ color: 'var(--text2)' }}>{n.body}</div>
                   <div className="text-[10px] mt-[2px]" style={{ color: 'var(--text3)' }}>{n.ts || n.at}</div>
@@ -105,7 +124,7 @@ export default function Topbar({ onMenuClick, onAction, dateFrom, dateTo, onDate
           <Icon name="printer" />
         </button>
         {meta.act && (
-          <button className="btn btn-brand btn-sm" onClick={onAction}>{meta.act}</button>
+          <button className="btn btn-brand btn-sm" onClick={() => pageAction && pageAction()} disabled={!pageAction}>{meta.act}</button>
         )}
         <SyncIndicator status={syncStatus} />
         <button className="btn btn-ghost btn-sm" onClick={logout}>Logout</button>

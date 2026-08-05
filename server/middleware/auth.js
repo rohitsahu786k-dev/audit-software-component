@@ -83,6 +83,47 @@ function requireAdmin(req) {
   }
 }
 
+// Mirrors client/src/utils/helpers.js DEFAULT_PERMS / loadPermissions — kept in sync
+// manually since client and server don't share a module. Used to enforce the
+// *configurable* per-role page grants server-side (requireAdmin above is for the
+// small set of things that must always be the literal admin role, never grantable).
+const DEFAULT_PERMS = {
+  admin:   { ocp:1,dashboard:1,analytics:1,planning:1,execution:1,reports:1,findings:1,capa:1,learnings:1,media:1,masterdata:1,adminpanel:1,mytasks:1,managerpanel:1,mastertracker:1,importdata:1 },
+  auditor: { ocp:1,dashboard:1,analytics:1,planning:1,execution:1,reports:1,findings:1,capa:1,learnings:1,media:1,masterdata:0,adminpanel:0,mytasks:1,managerpanel:1,mastertracker:1,importdata:1 },
+  spoc:    { ocp:1,dashboard:1,analytics:1,planning:0,execution:0,reports:1,findings:1,capa:1,learnings:1,media:1,masterdata:0,adminpanel:0,mytasks:1,managerpanel:0,mastertracker:1,importdata:0 },
+  manager: { ocp:1,dashboard:1,analytics:1,planning:0,execution:0,reports:1,findings:1,capa:1,learnings:1,media:1,masterdata:0,adminpanel:0,mytasks:1,managerpanel:1,mastertracker:1,importdata:0 },
+  viewer:  { ocp:1,dashboard:1,analytics:1,planning:0,execution:0,reports:1,findings:1,capa:0,learnings:0,media:1,masterdata:0,adminpanel:0,mytasks:1,managerpanel:0,mastertracker:0,importdata:0 },
+};
+
+function mergePermissions(saved) {
+  const roles = (saved && saved.roles) || saved || {};
+  const base = JSON.parse(JSON.stringify(DEFAULT_PERMS));
+  if (roles && typeof roles === 'object') {
+    Object.keys(base).forEach(role => {
+      if (!roles[role] || typeof roles[role] !== 'object') return;
+      Object.keys(base[role]).forEach(page => {
+        if (Object.prototype.hasOwnProperty.call(roles[role], page)) base[role][page] = roles[role][page] ? 1 : 0;
+      });
+    });
+  }
+  base.admin = Object.keys(base.admin).reduce((a, p) => { a[p] = 1; return a; }, {});
+  return base;
+}
+
+async function requirePageAccess(req, page) {
+  if (!req.authUser) { const err = new Error('Authentication required'); err.statusCode = 401; throw err; }
+  if (req.authUser.role === 'admin') return;
+  const collection = await getCollection();
+  const row = await collection.findOne({ key: 'ap_permissions' });
+  const perms = mergePermissions(row && row.value);
+  const role = req.authUser.role || 'viewer';
+  if (!(perms[role] && perms[role][page])) {
+    const err = new Error('You do not have permission to modify this data');
+    err.statusCode = 403;
+    throw err;
+  }
+}
+
 function wrapAsync(fn) {
   return function (req, res, next) { Promise.resolve(fn(req, res, next)).catch(next); };
 }
@@ -126,6 +167,6 @@ function hashOtp(userId, otp) {
 module.exports = {
   AUTH_TOKEN_TTL_MS, createAuthToken, parseAuthToken, cleanIdentity,
   findUserByIdentity, getUsersRecord, findActiveUserFromToken,
-  requireApiAuth, requireAdmin, wrapAsync,
+  requireApiAuth, requireAdmin, requirePageAccess, wrapAsync,
   hashPassword, verifyPassword, publicUser, hashOtp
 };

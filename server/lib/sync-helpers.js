@@ -6,9 +6,10 @@ const crypto = require('crypto');
 const SYNC_KEYS = [
   'ap_users','ap_depts','ap_auds','ap_cps','ap_finds','ap_learns',
   'ap_completed_audits','ap_planned_audits','ap_import_logs','ap_capa_due',
-  'ap_secs','ap_notifs','ap_stds','ap_permissions','ap_email_master',
+  'ap_notifs','ap_permissions','ap_email_master','ap_system_settings',
   'ap_email_templates','ap_email_logs','ap_required_cc_emails','ap_root_causes',
-  'ap_media_library','ap_escalation_matrix','ap_audit_drafts','ap_local_storage_backup'
+  'ap_media_library','ap_escalation_matrix','ap_audit_drafts','ap_local_storage_backup',
+  'ap_email_rules'
 ];
 
 function assertSyncKey(key) {
@@ -185,7 +186,8 @@ function normalizeFindingSyncState(f) {
   const pendingSignal=status==='pending-closure'||capaStatus==='submitted', unreviewed=hasUnreviewedClosureSubmission(item);
   if(pendingSignal&&(decision==='accept'||decision==='reject')){
     if(unreviewed){item.decision=null;item.decisionComments='';item.decisionDate=null;item.auditClosureDate=null;item.closedAt=null;}
-    else{item.status=decision==='accept'?'closed':'open';item.capaStatus=decision==='accept'?'closed':'open';}
+    // A rejected closure reopens to 'in-progress' so the SPOC can resubmit; must match the client.
+    else{item.status=decision==='accept'?'closed':'in-progress';item.capaStatus=decision==='accept'?'closed':'in-progress';}
     status=String(item.status||'').toLowerCase();capaStatus=String(item.capaStatus||'').toLowerCase();
   }
   if((status==='delayed'||capaStatus==='delayed')&&unreviewed){
@@ -344,9 +346,13 @@ function mergeCompletedAuditsForSync(currentValue,incomingValue,findingsValue) {
 function sanitizeUsersForClient(users) {
   return Array.isArray(users) ? users.map(u => {if(!u)return u;const c={...u};delete c.password;delete c.passwordHash;delete c.legacyPasswords;delete c.legacyPasswordHashes;return c;}) : users;
 }
-function sanitizeSyncValueForClient(key,value) {
+function sanitizeSyncValueForClient(key,value,requester) {
   if(key==='ap_users')return sanitizeUsersForClient(value);
   if(key==='ap_local_storage_backup'&&value&&typeof value==='object'){const c={...value};if(c.data){c.data={...c.data};if(c.data.ap_users)c.data.ap_users=sanitizeUsersForClient(c.data.ap_users);delete c.data.ap_rem_p;}return c;}
+  if(key==='ap_audit_drafts'&&Array.isArray(value)&&requester&&requester.role!=='admin'){
+    const myKey=String(requester.id||requester.loginId||requester.name||'').trim();
+    return value.filter(d=>d&&String(d.userKey||'')===myKey);
+  }
   return value;
 }
 

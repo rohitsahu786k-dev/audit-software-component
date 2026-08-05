@@ -1,14 +1,34 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
+import { apiFetch } from '../utils/api';
+import { showToast, mediaUrl, isImageMedia } from '../utils/helpers';
 
 // Lucide icon wrapper — uses the globally loaded lucide library
-export function Icon({ name, className = '' }) {
+export function Icon({ name, className = '', style }) {
+  const containerRef = useRef(null);
+
   useEffect(() => {
-    if (window.lucide && window.lucide.createIcons) {
-      window.lucide.createIcons();
+    if (containerRef.current) {
+      containerRef.current.innerHTML = '';
+      const iconEl = document.createElement('i');
+      iconEl.setAttribute('data-lucide', name);
+      iconEl.className = 'ico-svg';
+      containerRef.current.appendChild(iconEl);
+
+      if (window.lucide && window.lucide.createIcons) {
+        window.lucide.createIcons({
+          root: containerRef.current
+        });
+      }
     }
-  });
+  }, [name]);
+
   return (
-    <i data-lucide={name} className={`ico-svg ${className}`} aria-hidden="true" />
+    <span
+      ref={containerRef}
+      className={`inline-flex items-center justify-center ${className}`}
+      style={style}
+      aria-hidden="true"
+    />
   );
 }
 
@@ -113,7 +133,7 @@ export function ConfirmModal({ open, message, onConfirm, onCancel }) {
   return (
     <div className="modal-bg" onClick={onCancel}>
       <div className="modal-box" style={{ maxWidth: 360 }} onClick={e => e.stopPropagation()}>
-        <div className="modal-header">⚠️ Confirm</div>
+        <div className="modal-header"><span className="flex items-center gap-2"><Icon name="triangle-alert" /> Confirm</span></div>
         <div className="text-sm mb-4" style={{ color: 'var(--text2)' }}>{message}</div>
         <div className="flex gap-2">
           <button className="btn btn-ghost flex-1" onClick={onCancel}>Cancel</button>
@@ -128,16 +148,75 @@ export function Toast() {
   return <div className="toast" id="app-toast" />;
 }
 
+const readFileAsDataUrl = (file) => new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = () => rej(new Error('Read failed')); r.readAsDataURL(file); });
+const MAX_EVIDENCE_BYTES = 20 * 1024 * 1024;
+
+export function EvidenceUploader({ files, onChange, label = 'Evidence Photos' }) {
+  const [uploading, setUploading] = useState(false);
+  const inputRef = useRef(null);
+  const list = files || [];
+
+  const handleFiles = async (e) => {
+    const picked = Array.from(e.target.files || []);
+    e.target.value = '';
+    if (!picked.length) return;
+    setUploading(true);
+    try {
+      const added = [];
+      for (const file of picked) {
+        if (file.size > MAX_EVIDENCE_BYTES) { showToast(`${file.name} too large (max 20 MB)`); continue; }
+        const dataUrl = await readFileAsDataUrl(file);
+        const res = await apiFetch('/api/media/upload-base64', { method: 'POST', body: JSON.stringify({ data: dataUrl, filename: file.name, folder: 'auditpro' }) });
+        const it = res.item || {};
+        added.push({
+          name: file.name, file_name: file.name, url: it.url, secure_url: it.url,
+          publicId: it.id, public_id: it.id, resourceType: it.resourceType || 'image', resource_type: it.resourceType || 'image',
+          file_type: it.mediaType || it.resourceType || 'image', format: it.format || '', bytes: it.size || file.size,
+        });
+      }
+      if (added.length) onChange([...list, ...added]);
+    } catch (err) {
+      showToast(err.message || 'Upload failed');
+    }
+    setUploading(false);
+  };
+
+  const remove = (idx) => onChange(list.filter((_, i) => i !== idx));
+
+  return (
+    <div>
+      <label className="form-label">{label}</label>
+      <div className="flex flex-wrap gap-2 mb-1">
+        {list.map((f, i) => (
+          <a key={i} href={mediaUrl(f)} target="_blank" rel="noreferrer" className="flex items-center gap-1 text-[10px] px-2 py-1 rounded" style={{ background: 'var(--bg3)', color: 'var(--text2)' }}>
+            {isImageMedia(f)
+              ? <img src={mediaUrl(f)} alt={f.file_name || f.name} style={{ width: 20, height: 20, objectFit: 'cover', borderRadius: 3 }} />
+              : <Icon name="file" className="w-3 h-3" />}
+            <span className="truncate" style={{ maxWidth: 90 }}>{f.file_name || f.name}</span>
+            <button type="button" onClick={(e) => { e.preventDefault(); remove(i); }} style={{ border: 'none', background: 'none', cursor: 'pointer', color: 'var(--red)', display: 'inline-flex' }}><Icon name="x" className="w-3 h-3" /></button>
+          </a>
+        ))}
+      </div>
+      <button type="button" className="btn btn-ghost btn-sm" onClick={() => inputRef.current?.click()} disabled={uploading}>
+        <Icon name="camera" /> {uploading ? 'Uploading…' : 'Attach Photo(s)'}
+      </button>
+      <input ref={inputRef} type="file" accept="image/*,.pdf" multiple className="hidden" onChange={handleFiles} />
+    </div>
+  );
+}
+
 export function SyncIndicator({ status }) {
   const map = {
-    synced:     ['● MongoDB Synced', '#16a34a'],
-    connecting: ['◌ Connecting...', '#d97706'],
-    error:      ['⚠ Sync Error', '#dc2626'],
-    syncing:    ['↻ Syncing...', '#2563eb'],
-    offline:    ['○ Offline', '#6b7280'],
+    synced:     ['circle-check', 'MongoDB Synced', '#16a34a'],
+    connecting: ['loader', 'Connecting...', '#d97706'],
+    error:      ['circle-alert', 'Sync Error', '#dc2626'],
+    syncing:    ['refresh-cw', 'Syncing...', '#7c3aed'],
+    offline:    ['circle-slash', 'Offline', '#6b7280'],
   };
-  const [text, color] = map[status] || map.offline;
+  const [icon, text, color] = map[status] || map.offline;
   return (
-    <span className="sync-indicator" style={{ color }}>{text}</span>
+    <span className="sync-indicator" style={{ color }}>
+      <Icon name={icon} className="w-3 h-3" /> {text}
+    </span>
   );
 }

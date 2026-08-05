@@ -63,6 +63,12 @@ router.delete('/:publicId(*)', wrapAsync(async (req, res) => {
   res.json({ ok: true, result: data.result, data });
 }));
 
+router.get('/status', wrapAsync(async (_req, res) => {
+  const cfg = getCloudinaryConfig();
+  const configured = Boolean(cfg.cloudName && cfg.apiKey && cfg.apiSecret);
+  res.json({ ok: true, configured, cloudName: configured ? cfg.cloudName : null });
+}));
+
 router.get('/list', wrapAsync(async (_req, res) => {
   const collection = await getCollection();
   const row = await collection.findOne({ key: 'ap_media_library' });

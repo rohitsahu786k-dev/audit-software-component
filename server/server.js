@@ -4,8 +4,10 @@ require('dotenv').config({ path: require('path').resolve(__dirname, '../.env') }
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
+const cron = require('node-cron');
 const { getCollection, shutdown } = require('./lib/mongo');
 const { requireApiAuth, wrapAsync } = require('./middleware/auth');
+const { runEmailAutomation } = require('./lib/email-engine');
 const authRoutes = require('./routes/auth');
 const syncRoutes = require('./routes/sync');
 const emailRoutes = require('./routes/email');
@@ -70,9 +72,31 @@ app.use((err, _req, res, _next) => {
   res.status(status).json({ ok: false, error: err.message || 'Internal server error' });
 });
 
+// ── EMAIL AUTOMATION CRON ────────────────────────────
+// Reminders must fire whether or not anyone has the portal open, so the dispatch loop lives here
+// rather than in the browser. Requires a host that keeps the process alive (not a sleeping tier).
+const EMAIL_CRON = process.env.EMAIL_CRON || '0 9 * * *';
+const EMAIL_CRON_TZ = process.env.EMAIL_CRON_TZ || 'Asia/Kolkata';
+const EMAIL_AUTOMATION_ENABLED = String(process.env.EMAIL_AUTOMATION || 'true').toLowerCase() !== 'false';
+
+let emailCronTask = null;
+if (EMAIL_AUTOMATION_ENABLED) {
+  if (!cron.validate(EMAIL_CRON)) {
+    console.error(`[AuditPro] Invalid EMAIL_CRON "${EMAIL_CRON}" — email automation is DISABLED`);
+  } else {
+    emailCronTask = cron.schedule(EMAIL_CRON, () => {
+      runEmailAutomation({ by: 'cron' }).catch(err => console.error('[AuditPro] Email automation failed:', err));
+    }, { timezone: EMAIL_CRON_TZ });
+    console.log(`[AuditPro] Email automation scheduled: "${EMAIL_CRON}" (${EMAIL_CRON_TZ})`);
+  }
+} else {
+  console.log('[AuditPro] Email automation disabled (EMAIL_AUTOMATION=false)');
+}
+
 const server = app.listen(PORT, () => console.log(`[AuditPro] Server running on port ${PORT}`));
 
-process.on('SIGTERM', async () => { server.close(); await shutdown(); });
-process.on('SIGINT', async () => { server.close(); await shutdown(); process.exit(0); });
+const stop = async () => { if (emailCronTask) emailCronTask.stop(); server.close(); await shutdown(); };
+process.on('SIGTERM', async () => { await stop(); });
+process.on('SIGINT', async () => { await stop(); process.exit(0); });
 
 module.exports = app;

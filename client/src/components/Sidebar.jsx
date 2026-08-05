@@ -1,7 +1,7 @@
-import React, { useState } from 'react';
+import React from 'react';
 import { useApp } from '../context/AppContext';
 import { Icon } from './UI';
-import { showToast } from '../utils/helpers';
+import { ROLE_COLORS, ROLE_LABELS } from '../utils/helpers';
 
 const NAV_CFG = [
   { sec: 'My Workspace', items: [
@@ -29,7 +29,8 @@ const NAV_CFG = [
     { id: 'importdata', l: 'Bulk Import',    ico: 'upload' },
   ]},
   { sec: 'Admin', items: [
-    { id: 'adminpanel', l: 'Admin Panel', ico: 'shield', adminOnly: true },
+    { id: 'emailcenter', l: 'Email Center', ico: 'mail', adminOnly: true },
+    { id: 'adminpanel',  l: 'Admin Panel',  ico: 'shield', adminOnly: true },
   ]},
   { sec: 'Help', items: [
     { id: 'ocp', l: 'OCP Manual', ico: 'book-open' },
@@ -45,7 +46,7 @@ export default function Sidebar({ open, onClose }) {
 
   const badgeCounts = { findings: openFindings, capa: pendingCapa };
 
-  const go = (id) => { navigate(id); onClose && onClose(); };
+  const go = (id) => { navigate(id); if (onClose) onClose(); };
 
   return (
     <>
@@ -79,7 +80,7 @@ export default function Sidebar({ open, onClose }) {
                       className={`nav-item ${currentPage === item.id ? 'active' : ''}`}
                       onClick={() => go(item.id)}
                     >
-                      <span className="flex items-center justify-center w-[17px] h-[17px] flex-shrink-0">
+                      <span className="nav-ico">
                         <Icon name={item.ico} />
                       </span>
                       <span>{item.l}</span>
@@ -101,17 +102,15 @@ export default function Sidebar({ open, onClose }) {
           <div className="user-chip" onClick={() => go('profile')}>
             <div
               className="user-avatar"
-              style={{ background: currentUser?.role === 'admin' ? '#7c3aed' : currentUser?.role === 'auditor' ? '#2563eb' : '#16a34a' }}
+              style={{ background: ROLE_COLORS[currentUser?.role] || ROLE_COLORS.viewer }}
             >
               {(currentUser?.name || currentUser?.loginId || 'U').substring(0, 2).toUpperCase()}
             </div>
             <div className="flex-1 min-w-0">
-              <div className="text-[11px] font-bold truncate">{currentUser?.name || currentUser?.loginId}</div>
-              <div className="text-[9px]" style={{ color: 'var(--text3)' }}>
-                {{ admin:'Master Admin', auditor:'Auditor', spoc:'Dept SPOC', manager:'Manager', viewer:'Mgmt Viewer' }[currentUser?.role] || currentUser?.role}
-              </div>
+              <div className="text-[11px] font-bold truncate user-name">{currentUser?.name || currentUser?.loginId}</div>
+              <div className="text-[9px] user-role">{ROLE_LABELS[currentUser?.role] || currentUser?.role}</div>
             </div>
-            <span className="text-[9px]" style={{ color: 'var(--text3)' }}><Icon name="chevron-down" /></span>
+            <span className="text-[9px] user-chevron"><Icon name="chevron-down" /></span>
           </div>
         </div>
       </aside>
