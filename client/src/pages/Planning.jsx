@@ -33,7 +33,7 @@ export default function Planning() {
   const findings = getFindings();
 
   // Mode: 'standard' | 'typeSelect' | 'adhocDetails' | 'adhocImport'
-  const [auditMode, setAuditMode] = useState('standard');
+  const [auditMode, setAuditMode] = useState('typeSelect');
 
   // Standard audit form state
   const [standards, setStandards] = useState(['as9100d']);
