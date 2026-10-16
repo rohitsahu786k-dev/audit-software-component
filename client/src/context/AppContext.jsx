@@ -1,7 +1,8 @@
 import React, { createContext, useContext, useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { SYNC_KEYS, normalizeFindingsData, loadPermissions, genId } from '../utils/helpers';
 import { mergeEmailRules } from '../utils/emailRules';
-import { apiFetch, saveAuthToken, clearAuthState, hasUsableAuthToken } from '../utils/api';
+import { apiFetch } from '../utils/api';
+import { signIn, signOut, fetchCurrentUser } from '../utils/authApi';
 import { EMPTY_SESSION } from '../utils/auditEngine';
 
 const AppContext = createContext(null);
@@ -51,6 +52,7 @@ export function AppProvider({ children }) {
 
   // Sync refs
   const syncPollTimer = useRef(null);
+  const pollDeferred = useRef(false);
   const syncRemoteMeta = useRef({});
   const syncWriteTimers = useRef({});
   const apiReadyRef = useRef(false);
@@ -86,7 +88,7 @@ export function AppProvider({ children }) {
   const getRootCauses = useCallback(() => rootCausesData, [rootCausesData]);
   const mediaLibraryData = useMemo(() => syncData.ap_media_library || [], [syncData.ap_media_library]);
   const getMediaLibrary = useCallback(() => mediaLibraryData, [mediaLibraryData]);
-  const completedAuditsData = useMemo(() => syncData.ap_completed_audits || [], [syncData.ap_completed_audits]);
+  const completedAuditsData = useMemo(() => (syncData.ap_completed_audits || []).filter(a => a && !a.deletedAt), [syncData.ap_completed_audits]);
   const getCompletedAudits = useCallback(() => completedAuditsData, [completedAuditsData]);
   const plannedAuditsData = useMemo(() => syncData.ap_planned_audits || [], [syncData.ap_planned_audits]);
   const getPlannedAudits = useCallback(() => plannedAuditsData, [plannedAuditsData]);
@@ -110,20 +112,16 @@ export function AppProvider({ children }) {
 
   // ── LOGIN ──────────────────────────────────────────
   const login = useCallback(async (identity, password) => {
-    const data = await apiFetch('/api/auth/login', {
-      method: 'POST',
-      body: JSON.stringify({ identity, password }),
-    });
-    saveAuthToken(data.token, data.expiresInMs);
-    setCurrentUser(data.user);
+    const user = await signIn(identity, password);
+    setCurrentUser(user);
     // perms stay at their current (default) value until initSync fetches the real
     // ap_permissions from the server — do not overwrite with loadPermissions() here,
     // it requires the saved value as an argument and returns bare defaults without it.
-    return data.user;
+    return user;
   }, []);
 
   const logout = useCallback(() => {
-    clearAuthState();
+    signOut();
     setCurrentUser(null);
     setApiReady(false);
     apiReadyRef.current = false;
@@ -137,17 +135,10 @@ export function AppProvider({ children }) {
     if (syncPollTimer.current) clearTimeout(syncPollTimer.current);
   }, []);
 
-  // Resume a session token from a prior tab load (sessionStorage only, cleared when the tab closes)
+  // Resume an existing session cookie on page load (one /me request, no token handling).
   useEffect(() => {
     (async () => {
-      if (hasUsableAuthToken()) {
-        try {
-          const data = await apiFetch('/api/auth/me');
-          setCurrentUser(data.user);
-        } catch {
-          clearAuthState();
-        }
-      }
+      try { setCurrentUser(await fetchCurrentUser()); } catch { /* network error: show login */ }
       setAuthChecked(true);
     })();
   }, []);
@@ -165,10 +156,9 @@ export function AppProvider({ children }) {
   };
 
   const initSync = useCallback(async () => {
-    if (!currentUser || !hasUsableAuthToken()) return;
+    if (!currentUser) return;
     setSyncStatus('syncing');
     try {
-      await apiFetch('/api/health');
       setApiReady(true);
       apiReadyRef.current = true;
       const payload = await apiFetch('/api/sync');
@@ -199,7 +189,9 @@ export function AppProvider({ children }) {
   }, [currentUser]);
 
   const pollSync = useCallback(async () => {
-    if (!apiReadyRef.current || !hasUsableAuthToken()) return;
+    if (!apiReadyRef.current) return;
+    // A hidden tab has nobody to show changes to; skip the request and catch up when it is shown again.
+    if (document.hidden) { pollDeferred.current = true; return; }
     try {
       const payload = await apiFetch('/api/sync?manifest=1');
       const manifest = payload.data || {};
@@ -257,6 +249,31 @@ export function AppProvider({ children }) {
     }, SYNC_WRITE_DEBOUNCE_MS);
   }, [currentUser, logout]);
 
+  // Multi-key imports must reach MongoDB as one request so findings, completed-audit
+  // snapshots and the import log cannot drift apart after a partial browser write.
+  const writeSyncBulk = useCallback(async (items, by) => {
+    const validItems = Object.fromEntries(Object.entries(items || {}).filter(([key]) => SYNC_KEYS.includes(key)));
+    if (!apiReadyRef.current || !Object.keys(validItems).length) throw new Error('Database sync is not ready');
+    setSyncData(prev => {
+      const next = { ...prev };
+      Object.entries(validItems).forEach(([key, value]) => {
+        if (DATA_KEYS.includes(key)) next[key] = applyIncoming(key, value);
+      });
+      return next;
+    });
+    try {
+      await apiFetch('/api/sync/bulk', {
+        method: 'POST',
+        body: JSON.stringify({ items: validItems, by: by || currentUser?.loginId || 'browser' }),
+      });
+      setSyncStatus('synced');
+    } catch (err) {
+      setSyncStatus(err.status === 401 ? 'offline' : 'error');
+      if (err.status === 401) logout();
+      throw err;
+    }
+  }, [currentUser, logout]);
+
   const addNotification = useCallback((type, title, body, link, roles) => {
     if (systemSettingsData.emailNotifications === false) return;
     setNotifications(prev => {
@@ -269,7 +286,7 @@ export function AppProvider({ children }) {
 
   // Start sync once login is confirmed
   useEffect(() => {
-    if (currentUser && hasUsableAuthToken()) {
+    if (currentUser) {
       initSync();
     }
     return () => {
@@ -277,6 +294,17 @@ export function AppProvider({ children }) {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentUser?.id]);
+
+  // Resume polling when a tab that skipped its poll while hidden becomes visible again.
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.hidden || !pollDeferred.current) return;
+      pollDeferred.current = false;
+      pollSync();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
+  }, [pollSync]);
 
   // Notification count
   useEffect(() => {
@@ -297,7 +325,7 @@ export function AppProvider({ children }) {
     perms, setPerms,
     currentPage, navigate,
     notifications, setNotifications, pendingCount, addNotification,
-    writeSyncKey,
+    writeSyncKey, writeSyncBulk,
     canAccess,
     findingsDeptFilter, setFindingsDeptFilter,
     capaSelectedId, setCapaSelectedId,
@@ -315,7 +343,7 @@ export function AppProvider({ children }) {
     perms,
     currentPage, navigate,
     notifications, pendingCount, addNotification,
-    writeSyncKey,
+    writeSyncKey, writeSyncBulk,
     canAccess,
     findingsDeptFilter,
     capaSelectedId,

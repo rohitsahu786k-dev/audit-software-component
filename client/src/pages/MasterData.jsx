@@ -157,6 +157,12 @@ export default function MasterData() {
     writeSyncKey('ap_email_master', getEmailMaster().filter(x => x.id !== id), currentUser?.loginId);
     showToast('Deleted');
   };
+  const toggleEmailMasterStatus = (record) => {
+    const active = String(record.status || 'active').toLowerCase() === 'active';
+    const nextStatus = active ? 'inactive' : 'active';
+    writeSyncKey('ap_email_master', getEmailMaster().map(row => row.id === record.id ? { ...row, status: nextStatus, updatedAt: new Date().toISOString() } : row), currentUser?.loginId);
+    showToast(`${record.spocName || record.email} ${active ? 'deactivated' : 'activated'} for automatic emails`);
+  };
   const downloadEmailSample = () => {
     if (!window.XLSX) { showToast('Excel loading...'); return; }
     const ws = window.XLSX.utils.json_to_sheet([{ SPOCName: 'A. Gupta', EmailID: 'spoc@example.com', DepartmentName: 'Stores', ReportingToName: 'Manager', ReportingToEmail: 'manager@example.com', HODBUHEmail: 'hod@example.com', ManagementEmail: 'management@example.com', Status: 'Active' }]);
@@ -229,7 +235,7 @@ export default function MasterData() {
     setCheckingSmtp(true);
     try {
       const r = await apiFetch('/api/email/verify', {});
-      showToast(r.smtp ? 'SMTP connection OK (' + (r.user || '') + ')' : 'SMTP not verified');
+      showToast(r.smtp ? 'SMTP connection OK' : 'SMTP not verified');
     } catch (err) {
       showToast('SMTP check failed: ' + err.message);
     }
@@ -257,7 +263,7 @@ export default function MasterData() {
     const html = replaceTemplate(tplDraft.body, vars);
     try {
       await apiFetch('/api/email', { method: 'POST', body: JSON.stringify({ to: [testEmail.trim()], subject, html, text: html.replace(/<[^>]+>/g, ' ') }) });
-      await apiFetch('/api/email/log', { method: 'POST', body: JSON.stringify({ log: { type: 'test', to: testEmail.trim(), cc: '', subject, status: 'sent', sentAt: new Date().toISOString() }, by: currentUser?.loginId }) });
+      await apiFetch('/api/email/log', { method: 'POST', body: JSON.stringify({ log: { type: 'test', to: testEmail.trim(), cc: '', subject, status: 'sent', sentAt: new Date().toISOString() } }) });
       showToast('Test email sent to ' + testEmail.trim());
     } catch (err) {
       showToast('Send failed: ' + err.message);
@@ -442,8 +448,9 @@ export default function MasterData() {
                       <td><div className="font-bold">{r.spocName}</div><div className="text-[10px]" style={{ color: 'var(--text3)' }}>{r.email}</div></td>
                       <td>{r.department || r.deptCode}</td>
                       <td><div>{r.reportingName}</div><div className="text-[10px]" style={{ color: 'var(--text3)' }}>{r.reportingEmail}</div></td>
-                      <td><Badge type={r.status === 'active' ? 'b-green' : 'b-gray'}>{r.status === 'active' ? 'Active' : 'Inactive'}</Badge></td>
+                      <td><Badge type={String(r.status || 'active').toLowerCase() === 'active' ? 'b-green' : 'b-gray'}>{String(r.status || 'active').toLowerCase() === 'active' ? 'Active' : 'Inactive'}</Badge></td>
                       {canEdit && <td><div className="flex gap-1">
+                        <button className={`btn btn-sm ${String(r.status || 'active').toLowerCase() === 'active' ? 'btn-amber' : 'btn-brand'}`} onClick={() => toggleEmailMasterStatus(r)}>{String(r.status || 'active').toLowerCase() === 'active' ? 'Deactivate' : 'Activate'}</button>
                         <button className={`btn btn-sm ${emEdit?.id === r.id ? 'btn-primary' : 'btn-ghost'}`} onClick={() => setEmEdit(r)}>Edit</button>
                         <button className="btn btn-danger btn-sm" onClick={() => deleteEmailMaster(r.id)}>Delete</button>
                       </div></td>}

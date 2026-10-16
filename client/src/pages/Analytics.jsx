@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo } from 'react';
+import React, { useEffect, useMemo, useCallback } from 'react';
 import { useApp } from '../context/AppContext';
 import { Card, Badge, Icon } from '../components/UI';
 import { findingWorkflowStatus, sanitize, showToast } from '../utils/helpers';
@@ -7,6 +7,7 @@ import {
   latestDeptAuditInMonth, frozenAuditScore, findingRaisedDate, findingClosedDate,
   cumulativeClosureRateAt, closureTrendDeptHasData, deptHasAuditInYear,
   latestDeptAuditScore, clauseName, clauseDescription, auditScoreColorVar, filterFindingsByDateRange,
+  findingMatchesDeptCode, deptValuesMatch,
 } from '../utils/dashboardHelpers';
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -17,15 +18,16 @@ export default function Analytics({ dateFrom, dateTo }) {
   const isSpoc = currentUser?.role === 'spoc';
   const sDept = currentUser?.dept || '';
   const allFindings = getFindings();
+  const allDepts = getDepts();
   const completed = getCompletedAudits();
 
   const F = useMemo(() => {
     const base = filterFindingsByDateRange(allFindings, dateFrom, dateTo);
-    return isSpoc ? base.filter(f => f.dept === sDept) : base;
-  }, [allFindings, dateFrom, dateTo, isSpoc, sDept]);
+    return isSpoc ? base.filter(f => findingMatchesDeptCode(allDepts, f, sDept)) : base;
+  }, [allFindings, allDepts, dateFrom, dateTo, isSpoc, sDept]);
 
-  const trendFindings = useMemo(() => (isSpoc ? allFindings.filter(f => f.dept === sDept) : allFindings), [allFindings, isSpoc, sDept]);
-  const depts = useMemo(() => (isSpoc ? getDepts().filter(d => d.code === sDept) : getDepts()), [getDepts, isSpoc, sDept]);
+  const trendFindings = useMemo(() => (isSpoc ? allFindings.filter(f => findingMatchesDeptCode(allDepts, f, sDept)) : allFindings), [allFindings, allDepts, isSpoc, sDept]);
+  const depts = useMemo(() => (isSpoc ? allDepts.filter(d => deptValuesMatch(allDepts, d.code, sDept) || deptValuesMatch(allDepts, d.name, sDept)) : allDepts), [allDepts, isSpoc, sDept]);
 
   const closed = F.filter(f => f.status === 'closed').length;
   const capaRate = closureRate(F);
@@ -35,20 +37,21 @@ export default function Analytics({ dateFrom, dateTo }) {
   const now = new Date();
   const yr = now.getFullYear();
 
-  const getMonthlyData = (deptCode) => {
+  const getMonthlyData = useCallback((deptCode) => {
     const data = [];
+    const current = new Date();
     for (let m = 0; m < 12; m++) {
       const monthEnd = new Date(yr, m + 1, 0, 23, 59, 59, 999);
-      const isFuture = yr > now.getFullYear() || (yr === now.getFullYear() && m > now.getMonth());
+      const isFuture = yr > current.getFullYear() || (yr === current.getFullYear() && m > current.getMonth());
       const auditThisMonth = latestDeptAuditInMonth(completed, allFindings, depts, deptCode, yr, m);
       const hasClosureData = !isFuture && trendFindings.some(f => {
-        if (deptCode && f.dept !== deptCode) return false;
+        if (deptCode && !findingMatchesDeptCode(allDepts, f, deptCode)) return false;
         const raised = findingRaisedDate(f, yr);
         return raised && raised <= monthEnd;
       });
       const asOf = hasClosureData ? monthEnd : null;
       const mFinds = hasClosureData ? trendFindings.filter(f => {
-        if (deptCode && f.dept !== deptCode) return false;
+        if (deptCode && !findingMatchesDeptCode(allDepts, f, deptCode)) return false;
         const raised = findingRaisedDate(f, yr);
         return raised && raised <= asOf;
       }) : [];
@@ -57,15 +60,15 @@ export default function Analytics({ dateFrom, dateTo }) {
         const c = findingClosedDate(f, yr);
         return !c || c <= asOf;
       }).length : 0;
-      const cr = hasClosureData ? cumulativeClosureRateAt(trendFindings, deptCode, asOf, yr) : null;
+      const cr = hasClosureData ? cumulativeClosureRateAt(trendFindings, deptCode, asOf, yr, allDepts) : null;
       const as = auditThisMonth ? frozenAuditScore(auditThisMonth) : null;
       data.push({ month: MONTHS[m], total: mFinds.length, closed: cl, cr, auditScore: as });
     }
     return data;
-  };
+  }, [yr, completed, allFindings, depts, trendFindings, allDepts]);
 
   const closureRows = useMemo(() => depts
-    .filter(d => closureTrendDeptHasData(trendFindings, d.code, yr) || deptHasAuditInYear(completed, allFindings, depts, d.code, yr))
+    .filter(d => closureTrendDeptHasData(trendFindings, d.code, yr, allDepts) || deptHasAuditInYear(completed, allFindings, depts, d.code, yr))
     .map(d => {
       const md = getMonthlyData(d.code);
       const cells = md.map((cur, m) => {
@@ -82,7 +85,7 @@ export default function Analytics({ dateFrom, dateTo }) {
         return { val, arrow, color };
       });
       return { name: d.name, cells };
-    }), [depts, trendFindings, completed, allFindings]);
+    }), [depts, trendFindings, completed, allFindings, allDepts, yr, getMonthlyData]);
 
   const scoreRows = useMemo(() => depts
     .filter(d => deptHasAuditInYear(completed, allFindings, depts, d.code, yr))
@@ -95,18 +98,18 @@ export default function Analytics({ dateFrom, dateTo }) {
         return { val, color, bg };
       });
       return { name: d.name, cells };
-    }), [depts, trendFindings, completed, allFindings]);
+    }), [depts, completed, allFindings, yr, getMonthlyData]);
 
   const aiRisk = useMemo(() => {
     const rows = depts.map(d => {
-      const df = F.filter(f => f.dept === d.code && f.status !== 'closed');
+      const df = F.filter(f => findingMatchesDeptCode(allDepts, f, d.code) && f.status !== 'closed');
       const p = df.length ? Math.min(100, df.length * 12) : 0;
       const col = p >= 60 ? 'red' : p >= 30 ? 'amber' : 'green';
       const clauses = [...new Set(df.map(f => f.clause))].slice(0, 3).join(', ') || 'No issues';
       return { name: d.name, p, col, clauses };
     }).filter(x => x.p > 0).sort((a, b) => b.p - a.p).slice(0, 3);
     return rows.length ? rows : [{ name: '-', p: 0, col: 'green', clauses: 'No data yet' }];
-  }, [depts, F]);
+  }, [depts, F, allDepts]);
 
   const recurringClauses = useMemo(() => {
     const ncSev = { critical: 1, major: 1, minor: 1 };
@@ -155,7 +158,7 @@ export default function Analytics({ dateFrom, dateTo }) {
 
   const deptDelay = depts.slice(0, 5).map(d => ({
     name: d.name,
-    od: F.filter(f => f.dept === d.code && findingWorkflowStatus(f) === 'delayed').length,
+    od: F.filter(f => findingMatchesDeptCode(allDepts, f, d.code) && findingWorkflowStatus(f) === 'delayed').length,
   })).filter(d => d.od > 0);
 
   const exportPDF = () => {
@@ -174,8 +177,8 @@ export default function Analytics({ dateFrom, dateTo }) {
     });
     doc.autoTable({
       startY: doc.lastAutoTable.finalY + 8, head: [['Department', 'Total', 'Open', 'Closed', 'Audit Score', 'Closure %']],
-      body: depts.filter(d => F.some(f => f.dept === d.code) || latestDeptAuditScore(completed, allFindings, depts, d.code)).map(d => {
-        const df = F.filter(f => f.dept === d.code);
+      body: depts.filter(d => F.some(f => findingMatchesDeptCode(allDepts, f, d.code)) || latestDeptAuditScore(completed, allFindings, depts, d.code)).map(d => {
+        const df = F.filter(f => findingMatchesDeptCode(allDepts, f, d.code));
         const s = latestDeptAuditScore(completed, allFindings, depts, d.code);
         return [d.name, df.length, df.filter(f => f.status !== 'closed').length, df.filter(f => f.status === 'closed').length, (s && typeof s.score === 'number') ? s.score + '%' : 'N/A', closureRate(df) + '%'];
       }),

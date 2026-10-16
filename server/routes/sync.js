@@ -3,11 +3,12 @@
 const express = require('express');
 const router = express.Router();
 const { getCollection } = require('../lib/mongo');
-const { wrapAsync, requireAdmin, requirePageAccess } = require('../middleware/auth');
+const { wrapAsync, requireAdmin, requirePageAccess, actorOf, invalidateAuthCaches } = require('../middleware/auth');
 const {
   SYNC_KEYS, assertSyncKey, syncValuesEqual, sanitizeSyncValueForClient,
   mergeEmailLogs, mergeUsersForSync, mergeFindingsForSync,
-  mergeNotificationsForSync, mergeAuditDraftsForSync, mergeCompletedAuditsForSync
+  mergeNotificationsForSync, mergeAuditDraftsForSync, mergeCompletedAuditsForSync,
+  repairCompletedAuditScores
 } = require('../lib/sync-helpers');
 
 const SYNC_READ_THROTTLE_MS = 20 * 1000;
@@ -67,7 +68,17 @@ router.get('/keys', (_req, res) => res.json({ ok: true, keys: SYNC_KEYS }));
 router.get('/', wrapAsync(async (req, res) => {
   if (throttleSyncRead(req, res)) return;
   const collection = await getCollection();
-  const rows = await collection.find({ key: { $in: SYNC_KEYS.filter(k => k !== 'ap_local_storage_backup') } }).toArray();
+  const isManifest = req.query && (req.query.manifest === '1' || req.query.meta === '1');
+  // Polls only need timestamps, so skip loading every (large) document body for them.
+  const rows = await collection.find(
+    { key: { $in: SYNC_KEYS.filter(k => k !== 'ap_local_storage_backup') } },
+    isManifest ? { projection: { key: 1, updatedAt: 1, updatedBy: 1 } } : undefined
+  ).toArray();
+  const findingsRow = rows.find(row => row.key === 'ap_finds');
+  const completedRow = rows.find(row => row.key === 'ap_completed_audits');
+  if (completedRow && Array.isArray(completedRow.value)) {
+    completedRow.value = repairCompletedAuditScores(completedRow.value, findingsRow && findingsRow.value);
+  }
   if (req.query && (req.query.manifest === '1' || req.query.meta === '1')) {
     const data = {};
     rows.forEach(row => { data[row.key] = { updatedAt: row.updatedAt, updatedBy: row.updatedBy || 'system' }; });
@@ -84,7 +95,12 @@ router.get('/:key', wrapAsync(async (req, res) => {
   assertSyncKey(key);
   const collection = await getCollection();
   const row = await collection.findOne({ key });
-  res.json({ ok: true, key, value: row ? sanitizeSyncValueForClient(key, row.value, req.authUser) : null, updatedAt: row ? row.updatedAt : null });
+  let value = row ? row.value : null;
+  if (key === 'ap_completed_audits' && Array.isArray(value)) {
+    const findingsRow = await collection.findOne({ key: 'ap_finds' });
+    value = repairCompletedAuditScores(value, findingsRow && findingsRow.value);
+  }
+  res.json({ ok: true, key, value: row ? sanitizeSyncValueForClient(key, value, req.authUser) : null, updatedAt: row ? row.updatedAt : null });
 }));
 
 // PUT /api/sync/:key
@@ -104,7 +120,7 @@ router.put('/:key', wrapAsync(async (req, res) => {
     const clearedAt = replace && Array.isArray(incomingValue) && incomingValue.length === 0 ? now : (current && current.clearedAt);
     const value = replace ? (Array.isArray(incomingValue) ? incomingValue : []) : mergeEmailLogs(current && current.value, incomingValue, clearedAt);
     if (!replace && current && syncValuesEqual(key, current.value, value)) return res.json({ ok: true, key, skipped: true, updatedAt: current.updatedAt || null, count: value.length });
-    await collection.updateOne({ key }, { $set: { key, value, updatedAt: now, updatedBy: (req.body && req.body.by) || 'browser', clearedAt: clearedAt || null } }, { upsert: true });
+    await collection.updateOne({ key }, { $set: { key, value, updatedAt: now, updatedBy: actorOf(req), clearedAt: clearedAt || null } }, { upsert: true });
     return res.json({ ok: true, key, updatedAt: now, count: value.length });
   }
 
@@ -119,7 +135,8 @@ router.put('/:key', wrapAsync(async (req, res) => {
 
   const current = await loadCurrent();
   if (current && syncValuesEqual(key, current.value, incomingValue)) return res.json({ ok: true, key, skipped: true, updatedAt: current.updatedAt || null });
-  await collection.updateOne({ key }, { $set: { key, value: incomingValue, updatedAt: now, updatedBy: (req.body && req.body.by) || 'browser' } }, { upsert: true });
+  await collection.updateOne({ key }, { $set: { key, value: incomingValue, updatedAt: now, updatedBy: actorOf(req) } }, { upsert: true });
+  if (key === 'ap_users' || key === 'ap_permissions') invalidateAuthCaches();
   res.json({ ok: true, key, updatedAt: now });
 }));
 
@@ -147,7 +164,8 @@ router.post('/bulk', wrapAsync(async (req, res) => {
   }
   const writeKeys = keys.filter(k => { const c = currentRows.get(k); return !(c && syncValuesEqual(k, c.value, items[k])); });
   if (!writeKeys.length) return res.json({ ok: true, count: 0, skipped: keys.length, updatedAt: now });
-  await collection.bulkWrite(writeKeys.map(k => ({ updateOne: { filter: { key: k }, update: { $set: { key: k, value: items[k], updatedAt: now, updatedBy: (req.body && req.body.by) || 'browser' } }, upsert: true } })));
+  await collection.bulkWrite(writeKeys.map(k => ({ updateOne: { filter: { key: k }, update: { $set: { key: k, value: items[k], updatedAt: now, updatedBy: actorOf(req) } }, upsert: true } })));
+  if (writeKeys.includes('ap_users') || writeKeys.includes('ap_permissions')) invalidateAuthCaches();
   res.json({ ok: true, count: writeKeys.length, skipped: keys.length - writeKeys.length, updatedAt: now });
 }));
 
@@ -158,6 +176,7 @@ router.delete('/:key', wrapAsync(async (req, res) => {
   assertSyncKey(key);
   const collection = await getCollection();
   await collection.deleteOne({ key });
+  invalidateAuthCaches();
   res.json({ ok: true, key });
 }));
 
@@ -166,6 +185,7 @@ router.delete('/', wrapAsync(async (req, res) => {
   requireAdmin(req);
   const collection = await getCollection();
   const result = await collection.deleteMany({ key: { $in: SYNC_KEYS } });
+  invalidateAuthCaches();
   res.json({ ok: true, deletedCount: result.deletedCount });
 }));
 

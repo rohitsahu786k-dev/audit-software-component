@@ -2,7 +2,7 @@ import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { useApp } from '../context/AppContext';
 import { Card, Badge, Tabs, Pagination, Icon } from '../components/UI';
 import { SEV_BADGE, SEV_LABEL, STAT_BADGE, STAT_LABEL, showToast } from '../utils/helpers';
-import { managerDeptCodes, filterFindingsByDateRange } from '../utils/dashboardHelpers';
+import { managerDeptCodes, filterFindingsByDateRange, findingMatchesDeptCode, deptCodeInList } from '../utils/dashboardHelpers';
 
 const PAGE_SIZE = 15;
 
@@ -13,15 +13,16 @@ export default function MasterTracker({ dateFrom, dateTo }) {
   const [page, setPage] = useState(1);
 
   const role = currentUser?.role;
-  const codes = useMemo(() => managerDeptCodes(currentUser, getDepts(), getEmailMaster()), [currentUser, getDepts, getEmailMaster]);
+  const depts = getDepts();
+  const codes = useMemo(() => managerDeptCodes(currentUser, depts, getEmailMaster()), [currentUser, depts, getEmailMaster]);
   const canGlobal = role === 'admin' || role === 'auditor';
 
   const baseFindings = useMemo(() => {
     let list = filterFindingsByDateRange(getFindings(), dateFrom, dateTo);
-    if (role === 'spoc') list = list.filter(f => f.dept === currentUser?.dept);
-    else if (role === 'manager') list = list.filter(f => codes.includes(f.dept));
+    if (role === 'spoc') list = list.filter(f => findingMatchesDeptCode(depts, f, currentUser?.dept));
+    else if (role === 'manager') list = list.filter(f => deptCodeInList(depts, f.dept, codes) || deptCodeInList(depts, f.deptName, codes));
     return list;
-  }, [getFindings, dateFrom, dateTo, role, currentUser, codes]);
+  }, [getFindings, depts, dateFrom, dateTo, role, currentUser, codes]);
 
   const learnings = useMemo(() => {
     let list = getLearnings();

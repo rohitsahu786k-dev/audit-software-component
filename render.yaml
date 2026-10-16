@@ -35,12 +35,12 @@ services:
         value: onepws_audit
 
       # ── Auth (required) ──
-      # Without this, AUTH_SECRET is derived from MONGODB_DB (middleware/auth.js),
-      # which is guessable. Use Render's "Generate" button for a random value.
+      # Signs the Auth.js session cookie. The server refuses to start without a
+      # 32+ character value, so there is no guessable fallback.
       - key: AUTH_SECRET
         generateValue: true
-      - key: AUTH_TOKEN_TTL_MS
-        value: "604800000"
+      - key: AUTH_SESSION_MAX_AGE_SECONDS
+        value: "28800"
 
       # ── SMTP / Gmail (required for CAPA reminders + password reset) ──
       - key: SMTP_HOST

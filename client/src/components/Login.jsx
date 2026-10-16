@@ -42,13 +42,14 @@ export default function Login() {
     try {
       await apiFetch('/api/auth/forgot-password', { method: 'POST', body: JSON.stringify({ identity: fpId.trim() }) });
       setFpStep2(true);
-      showToast('OTP sent to your registered email');
+      showToast('If the account exists, an OTP has been sent to its registered email');
     } catch (err) { showToast(err.message || 'Failed to send OTP'); }
     finally { setFpLoading(false); }
   };
 
   const resetPw = async () => {
     if (!fpOtp || !fpPw || fpPw !== fpPw2) { showToast('Check OTP and password match'); return; }
+    if (fpPw.length < 8) { showToast('Password must be at least 8 characters'); return; }
     setFpLoading(true);
     try {
       await apiFetch('/api/auth/reset-password', { method: 'POST', body: JSON.stringify({ identity: fpId.trim(), otp: fpOtp.trim(), newPassword: fpPw }) });
@@ -112,10 +113,7 @@ export default function Login() {
           </div>
         </div>
 
-        <div className="flex items-center justify-between mb-[10px]">
-          <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: 'var(--text2)', cursor: 'pointer' }}>
-            <input type="checkbox" style={{ width: 'auto' }} /> Remember Me
-          </label>
+        <div className="flex items-center justify-end mb-[10px]">
           <button className="btn btn-ghost btn-sm" style={{ padding: '4px 7px', fontSize: 10 }} type="button" onClick={() => setForgot(true)}>
             <Icon name="key-round" /> Forgot?
           </button>
@@ -150,7 +148,7 @@ export default function Login() {
                 <div className="info-box mb-2">Enter the OTP sent to your registered email. The email contains only an OTP, no development link.</div>
                 <div className="grid grid-cols-2 gap-[9px] mb-2">
                   <div><label className="form-label">OTP</label><input inputMode="numeric" maxLength={6} placeholder="6 digit OTP" value={fpOtp} onChange={e => setFpOtp(e.target.value)} /></div>
-                  <div><label className="form-label">New Password</label><input type="password" placeholder="Min 6 chars" value={fpPw} onChange={e => setFpPw(e.target.value)} /></div>
+                  <div><label className="form-label">New Password</label><input type="password" placeholder="Min 8 chars" value={fpPw} onChange={e => setFpPw(e.target.value)} /></div>
                 </div>
                 <div className="mb-2"><label className="form-label">Confirm Password</label><input type="password" value={fpPw2} onChange={e => setFpPw2(e.target.value)} /></div>
                 <button className="btn btn-brand" style={{ width: '100%' }} onClick={resetPw} disabled={fpLoading}>

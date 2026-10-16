@@ -41,7 +41,7 @@ export default function Sidebar({ open, onClose }) {
   const { currentUser, currentPage, navigate, canAccess, getFindings } = useApp();
 
   const findings = getFindings();
-  const openFindings = findings.filter(f => ['open','in-progress','delayed'].includes(String(f.status||'').toLowerCase())).length;
+  const openFindings = findings.filter(f => f && String(f.status || '').toLowerCase() !== 'closed').length;
   const pendingCapa = findings.filter(f => String(f.capaStatus||'').toLowerCase() === 'submitted' || String(f.status||'').toLowerCase() === 'pending-closure').length;
 
   const badgeCounts = { findings: openFindings, capa: pendingCapa };

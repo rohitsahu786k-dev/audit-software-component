@@ -80,12 +80,13 @@ export default function EmailCenter() {
         spoc: m.email || '',
         manager: m.reportingEmail || '',
         hod: m.hodEmail || '',
+        masterActive: String(m.status || 'active').toLowerCase() !== 'inactive',
         rule: deptRuleOf(rules, m.deptCode),
       }))
       .sort((a, b) => a.name.localeCompare(b.name));
   }, [emailMaster, depts, rules, deptSearch]);
 
-  const mutedCount = rows.filter(r => r.rule.enabled === false).length;
+  const mutedCount = rows.filter(r => !r.masterActive || r.rule.enabled === false).length;
 
   const runEngine = async (dryRun) => {
     setBusy(dryRun ? 'preview' : 'send');
@@ -189,11 +190,12 @@ export default function EmailCenter() {
                   const isOpen = expanded === r.code;
                   return (
                     <React.Fragment key={r.code}>
-                      <tr style={{ opacity: deptOn ? 1 : 0.5 }}>
-                        <td><Toggle checked={deptOn} onChange={v => patchDept(r.code, { enabled: v }, `${r.name}: automatic emails ${v ? 'on' : 'off'}`)} /></td>
+                      <tr style={{ opacity: deptOn && r.masterActive ? 1 : 0.5 }}>
+                        <td><Toggle checked={deptOn && r.masterActive} disabled={!r.masterActive} onChange={v => patchDept(r.code, { enabled: v }, `${r.name}: automatic emails ${v ? 'on' : 'off'}`)} /></td>
                         <td>
                           <div className="font-bold text-[11px]">{r.name}</div>
                           <div className="text-[9px]" style={{ color: 'var(--text3)' }}>{r.code}</div>
+                          {!r.masterActive && <Badge type="b-gray">Email record inactive</Badge>}
                         </td>
                         <td>
                           {r.spoc
@@ -211,7 +213,7 @@ export default function EmailCenter() {
                               <div className="inline-flex">
                                 <Toggle
                                   checked={on}
-                                  disabled={!deptOn || blockedGlobally}
+                                  disabled={!deptOn || !r.masterActive || blockedGlobally}
                                   onChange={v => patchDept(r.code, { types: { ...(r.rule.types || {}), [t.key]: v } }, `${r.name} · ${t.label}: ${v ? 'on' : 'off'}`)}
                                 />
                               </div>
@@ -311,9 +313,9 @@ export default function EmailCenter() {
             <div className="mb-3">
               <label className="form-label">Remind this many days before the target date</label>
               <input
-                type="number" min={0} max={30}
+                type="number" min={0} max={2}
                 value={rules.windowDays}
-                onChange={e => patch({ windowDays: Math.max(0, Math.min(30, Number(e.target.value) || 0)) })}
+                onChange={e => patch({ windowDays: Math.max(0, Math.min(2, Number(e.target.value) || 0)) })}
               />
               <div className="text-[10px] mt-1" style={{ color: 'var(--text3)' }}>
                 Upcoming reminders start {rules.windowDays} day(s) before an NC is due.

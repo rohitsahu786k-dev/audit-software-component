@@ -15,12 +15,24 @@ const PAGE_LABELS = {
 };
 const ROLE_ORDER = ['admin', 'auditor', 'spoc', 'manager', 'viewer'];
 const SYSTEM_TOGGLES = [
-  { key: 'emailNotifications', label: 'Email Notifications (in-app alerts to all roles when findings/CAPAs change)' },
+  { key: 'emailNotifications', label: 'Email Notifications (automatic emails and in-app alerts)' },
   { key: 'autoEscalation', label: 'Auto-escalation Rules' },
   { key: 'requireEvidenceForNCs', label: 'Require Evidence for NCs' },
   { key: 'allowAuditorsDeleteFindings', label: 'Allow Auditors to Delete Findings' },
   { key: 'spocCommentRequiredForClosure', label: 'SPOC Comment Required for Closure' },
 ];
+
+function generateAdminPassword() {
+  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789';
+  const bytes = new Uint8Array(10);
+  if (window.crypto && window.crypto.getRandomValues) window.crypto.getRandomValues(bytes);
+  else for (let i = 0; i < bytes.length; i++) bytes[i] = Math.floor(Math.random() * 256);
+  return 'OnePWS@' + Array.from(bytes, byte => alphabet[byte % alphabet.length]).join('') + '!';
+}
+
+function copyText(text) {
+  if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(String(text || '')).catch(() => {});
+}
 
 export default function AdminPanel() {
   const {
@@ -103,12 +115,16 @@ export default function AdminPanel() {
     showToast(`User ${u.name} ${u.active ? 'deactivated' : 'activated'}`);
   };
 
-  const saveResetPassword = () => {
-    if (!pwValue || pwValue.length < 6) { showToast('Password must be at least 6 characters'); return; }
-    const updated = getUsers().map(u => u.id === pwModal.id ? { ...u, password: pwValue } : u);
-    writeSyncKey('ap_users', updated, currentUser?.loginId);
-    showToast(`Password reset for ${pwModal.name}`);
-    setPwModal(null); setPwValue('');
+  const saveResetPassword = async () => {
+    if (!pwValue || pwValue.length < 8) { showToast('Password must be at least 8 characters'); return; }
+    try {
+      await apiFetch('/api/auth/admin-reset-password', { method: 'POST', body: JSON.stringify({ userId: pwModal.id, password: pwValue }) });
+      copyText(pwValue);
+      showToast(`Password reset for ${pwModal.name} and copied`);
+      setPwModal(null); setPwValue('');
+    } catch (err) {
+      showToast('Password reset failed: ' + err.message);
+    }
   };
 
   // ── PERMISSIONS ────────────────────────────────────
@@ -193,15 +209,13 @@ export default function AdminPanel() {
     if (!resetAck) { showToast('Please confirm you understand this is permanent'); return; }
     setResetBusy(true);
     try {
-      const data = await apiFetch('/api/auth/login', { method: 'POST', body: JSON.stringify({ identity: currentUser.loginId, password: resetPw }) });
-      if (!data.user || data.user.role !== 'admin') { showToast('Incorrect password. Reset denied.'); setResetBusy(false); return; }
+      await apiFetch('/api/auth/verify-password', { method: 'POST', body: JSON.stringify({ password: resetPw }) });
       await apiFetch('/api/sync', { method: 'DELETE' });
       Object.keys(localStorage).filter(k => k.startsWith('ap_') || k.startsWith('imp_')).forEach(k => localStorage.removeItem(k));
-      sessionStorage.clear();
       showToast('All data reset. Reloading...');
       setTimeout(() => { window.location.reload(); }, 1200);
     } catch (err) {
-      showToast('Reset failed: ' + err.message);
+      showToast(err.status === 403 ? 'Incorrect password. Reset denied.' : 'Reset failed: ' + err.message);
       setResetBusy(false);
     }
   };
@@ -244,7 +258,7 @@ export default function AdminPanel() {
                       <td>
                         <div className="flex gap-1">
                           <button className="btn btn-ghost btn-sm btn-icon" title="Edit" onClick={() => setEditItem(u)}><Icon name="pencil" /></button>
-                          <button className="btn btn-primary btn-sm btn-icon" title="Reset Password" onClick={() => setPwModal({ id: u.id, name: u.name })}><Icon name="key" /></button>
+                          <button className="btn btn-primary btn-sm btn-icon" title="Reset Password" onClick={() => { setPwModal({ id: u.id, name: u.name }); setPwValue(generateAdminPassword()); }}><Icon name="key" /></button>
                           <button className="btn btn-amber btn-sm" onClick={() => setConfirmDeactivate(u)}>{u.active !== false ? 'Deact' : 'Act'}</button>
                           {u.id !== currentUser?.id && (
                             <button className="btn btn-danger btn-sm btn-icon" onClick={() => setConfirmDelete(u)}><Icon name="trash-2" /></button>
@@ -359,7 +373,7 @@ export default function AdminPanel() {
             <div className="mb-2"><label className="form-label">Email *</label><input value={editItem.email} onChange={e => setEditItem(p => ({ ...p, email: e.target.value }))} placeholder="user@company.com" /></div>
             <div className="mb-3">
               <label className="form-label">{editItem.id ? 'Password (leave blank to keep current)' : 'Password *'}</label>
-              <input type="password" value={editItem.password || ''} onChange={e => setEditItem(p => ({ ...p, password: e.target.value }))} placeholder="min 6 characters" />
+              <input type="password" value={editItem.password || ''} onChange={e => setEditItem(p => ({ ...p, password: e.target.value }))} placeholder="min 8 characters" />
             </div>
             <div className="flex gap-2">
               <button className="btn btn-ghost flex-1" onClick={() => setEditItem(null)}>Cancel</button>
@@ -374,7 +388,8 @@ export default function AdminPanel() {
         <div className="modal-bg" onClick={() => setPwModal(null)}>
           <div className="modal-box" style={{ maxWidth: 360 }} onClick={e => e.stopPropagation()}>
             <div className="modal-header"><span>Reset Password — {pwModal.name}</span><button className="btn btn-ghost btn-sm btn-icon" onClick={() => setPwModal(null)}><Icon name="x" /></button></div>
-            <div className="mb-3"><label className="form-label">New Password *</label><input type="password" value={pwValue} onChange={e => setPwValue(e.target.value)} placeholder="min 6 characters" /></div>
+            <div className="info-box mb-3 text-xs">The current password cannot be viewed because it is stored as a secure hash. Use the generated password or enter a new one.</div>
+            <div className="mb-3"><label className="form-label">New Password *</label><div className="flex gap-2"><input value={pwValue} onChange={e => setPwValue(e.target.value)} placeholder="min 8 characters" /><button className="btn btn-ghost btn-sm" onClick={() => copyText(pwValue)}><Icon name="copy" /> Copy</button></div></div>
             <div className="flex gap-2">
               <button className="btn btn-ghost flex-1" onClick={() => setPwModal(null)}>Cancel</button>
               <button className="btn btn-primary flex-1" onClick={saveResetPassword}>Reset Password</button>

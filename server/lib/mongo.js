@@ -20,11 +20,19 @@ async function getCollection() {
 
   if (!mongoConnectPromise) {
     mongoConnectPromise = (async () => {
-      mongoClient = new MongoClient(MONGODB_URI);
+      mongoClient = new MongoClient(MONGODB_URI, {
+        maxPoolSize: 10,
+        minPoolSize: 0,
+        serverSelectionTimeoutMS: 8000,
+        connectTimeoutMS: 8000,
+        socketTimeoutMS: 20000,
+      });
       await mongoClient.connect();
       const db = mongoClient.db(MONGODB_DB);
       appData = db.collection('appdata');
       await appData.createIndex({ key: 1 }, { unique: true });
+      // Expires rate-limit counters (rate-limit.js) once their window has passed.
+      await appData.createIndex({ expireAt: 1 }, { expireAfterSeconds: 0 });
       console.log(`[AuditPro] MongoDB connected: ${MONGODB_DB}.appdata`);
       return appData;
     })().catch(err => {

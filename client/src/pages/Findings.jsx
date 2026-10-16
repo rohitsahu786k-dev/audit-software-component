@@ -2,7 +2,7 @@ import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { useApp } from '../context/AppContext';
 import { Card, Badge, Pagination, ConfirmModal, Icon } from '../components/UI';
 import { SEV_BADGE, SEV_LABEL, STAT_BADGE, STAT_LABEL, showToast, today } from '../utils/helpers';
-import { managerDeptCodes, filterFindingsByDateRange, normalizeAuditSeverity } from '../utils/dashboardHelpers';
+import { managerDeptCodes, filterFindingsByDateRange, normalizeAuditSeverity, findingMatchesDeptCode, deptCodeInList } from '../utils/dashboardHelpers';
 
 const PAGE_SIZE = 15;
 
@@ -28,14 +28,15 @@ export default function Findings({ dateFrom, dateTo }) {
     if (findingsDeptFilter) { setFilterDept(findingsDeptFilter); setFindingsDeptFilter(''); }
   }, [findingsDeptFilter, setFindingsDeptFilter]);
 
-  const canEditRecord = (f) => role === 'admin' || role === 'auditor' || (role === 'manager' && codes.includes(f?.dept));
-  const canDeleteRecord = (f) => role === 'admin' || (role === 'auditor' && settings.allowAuditorsDeleteFindings) || (role === 'manager' && codes.includes(f?.dept));
+  const isManagedFinding = (f) => deptCodeInList(depts, f?.dept, codes) || deptCodeInList(depts, f?.deptName, codes);
+  const canEditRecord = (f) => role === 'admin' || role === 'auditor' || (role === 'manager' && isManagedFinding(f));
+  const canDeleteRecord = (f) => role === 'admin' || (role === 'auditor' && settings.allowAuditorsDeleteFindings) || (role === 'manager' && isManagedFinding(f));
 
   const filtered = useMemo(() => {
     const q = search.toLowerCase().trim();
     let list = filterFindingsByDateRange(findings, dateFrom, dateTo, ['due']);
     list = list.filter(f => {
-      if (filterDept && f.dept !== filterDept) return false;
+      if (filterDept && !findingMatchesDeptCode(depts, f, filterDept)) return false;
       if (filterSev && normalizeAuditSeverity(f.sev || f.severity) !== filterSev) return false;
       if (filterStatus && f.status !== filterStatus) return false;
       if (q && ![f.ref, f.deptName, f.desc, f.clause, SEV_LABEL[f.sev], STAT_LABEL[f.status]].join(' ').toLowerCase().includes(q)) return false;
@@ -45,7 +46,7 @@ export default function Findings({ dateFrom, dateTo }) {
       const va = String(a[sortField] || '').toLowerCase(), vb = String(b[sortField] || '').toLowerCase();
       return sortAsc ? va.localeCompare(vb) : vb.localeCompare(va);
     });
-  }, [findings, dateFrom, dateTo, filterDept, filterSev, filterStatus, search, sortField, sortAsc]);
+  }, [findings, depts, dateFrom, dateTo, filterDept, filterSev, filterStatus, search, sortField, sortAsc]);
 
   const paged = filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
 
@@ -130,7 +131,7 @@ export default function Findings({ dateFrom, dateTo }) {
                   <td><Badge type={SEV_BADGE[f.sev] || 'b-gray'}>{SEV_LABEL[f.sev] || f.sev}</Badge></td>
                   <td><Badge type="b-blue">{f.clause}</Badge></td>
                   <td style={{ color: f.status === 'delayed' ? 'var(--red)' : 'inherit', fontWeight: f.status === 'delayed' ? 800 : 400 }}>{f.due}</td>
-                  <td><Badge type={STAT_BADGE[f.status] || 'b-gray'}>{STAT_LABEL[f.status] || f.status}</Badge>{f.type === 'repeat' ? <> <Badge type="b-purple">Repeat</Badge></> : null}</td>
+                  <td><Badge type={STAT_BADGE[f.status] || 'b-gray'}>{STAT_LABEL[f.status] || f.status}</Badge>{f.type === 'repeat' ? <> <Badge type="b-purple">Repeat</Badge></> : null}{f.externalAudit ? <> <span title={`External audit ${f.auditRef || ''}${f.responsibleOwner ? ' · Owner: ' + f.responsibleOwner : ''}`}><Badge type="b-blue">External</Badge></span></> : null}</td>
                   <td>
                     {role === 'viewer' ? '-' : (
                       <div className="flex gap-1 flex-wrap">

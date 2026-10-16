@@ -1,10 +1,11 @@
-import React, { useState, useMemo, useEffect, useRef } from 'react';
+import React, { useState, useMemo, useEffect, useRef, useCallback } from 'react';
 import { useApp } from '../context/AppContext';
 import { Card, Badge, EmptyState, Icon } from '../components/UI';
 import { SEV_BADGE, SEV_LABEL, STAT_BADGE, STAT_LABEL, sanitize, showToast } from '../utils/helpers';
 import {
-  auditFindingCounts, latestDeptAudit, latestDeptAuditScore, frozenAuditScore,
+  auditFindingCounts, latestDeptAudit, latestDeptAuditScore,
   completedAuditsSorted, auditScoreColorVar, parseAuditDate, filterFindingsByDateRange,
+  findingMatchesDeptCode, deptValuesMatch, deptToken, auditMatchesDeptCode,
 } from '../utils/dashboardHelpers';
 
 const AUDIT_STANDARDS = [
@@ -30,7 +31,7 @@ export default function Reports({ dateFrom, dateTo }) {
 
   const [standards, setStandards] = useState(['as9100d']);
   const [statusFilter, setStatusFilter] = useState('completed');
-  const [deptFilter, setDeptFilter] = useState('all');
+  const [deptFilters, setDeptFilters] = useState([]);
   const [selected, setSelected] = useState(null);
 
   const isSpoc = currentUser?.role === 'spoc';
@@ -39,57 +40,96 @@ export default function Reports({ dateFrom, dateTo }) {
 
   const dateFindings = useMemo(() => filterFindingsByDateRange(allFindings, dateFrom, dateTo), [allFindings, dateFrom, dateTo]);
 
+  const reportDeptHasData = useCallback((d) => {
+    if (statusFilter === 'completed') return completedAuditsSorted(completed, allFindings, depts, d.code).length > 0;
+    return dateFindings.some(f => findingMatchesDeptCode(depts, f, d.code))
+      || completedAuditsSorted(completed, allFindings, depts).some(a => auditMatchesDeptCode(depts, a, d.code));
+  }, [statusFilter, completed, allFindings, depts, dateFindings]);
+
   const reportDeptList = useMemo(() => {
-    let list = isSpoc ? depts.filter(d => d.code === currentUser?.dept) : (deptFilter !== 'all' ? depts.filter(d => d.code === deptFilter) : depts);
-    if (statusFilter === 'completed') {
-      const done = new Set(completedAuditsSorted(completed, allFindings, depts).map(a => a.dept));
-      list = list.filter(d => done.has(d.code));
-    }
-    return list;
-  }, [depts, isSpoc, currentUser, deptFilter, statusFilter, completed, allFindings]);
+    let list = isSpoc
+      ? depts.filter(d => deptValuesMatch(depts, d.code, currentUser?.dept) || deptValuesMatch(depts, d.name, currentUser?.dept))
+      : deptFilters.length
+        ? depts.filter(d => deptFilters.some(code => deptValuesMatch(depts, d.code, code) || deptValuesMatch(depts, d.name, code)))
+        : depts;
+    if (statusFilter === 'completed') list = list.filter(reportDeptHasData);
+    const byAlias = new Map();
+    list.forEach(d => {
+      const key = deptToken(d.name) || deptToken(d.code);
+      const previous = byAlias.get(key);
+      if (!previous) { byAlias.set(key, d); return; }
+      const wanted = deptFilters.length ? deptFilters : [currentUser?.dept || ''];
+      const exact = wanted.some(code => deptValuesMatch(depts, d.code, code));
+      const previousExact = wanted.some(code => deptValuesMatch(depts, previous.code, code));
+      const audited = completedAuditsSorted(completed, allFindings, depts).some(a => String(a.dept || '').toUpperCase() === String(d.code || '').toUpperCase());
+      const previousAudited = completedAuditsSorted(completed, allFindings, depts).some(a => String(a.dept || '').toUpperCase() === String(previous.code || '').toUpperCase());
+      if ((exact && !previousExact) || (audited && !previousAudited)) byAlias.set(key, d);
+    });
+    return [...byAlias.values()];
+  }, [depts, isSpoc, currentUser, deptFilters, statusFilter, completed, allFindings, reportDeptHasData]);
 
   const cardData = (d) => {
-    if (statusFilter === 'completed') {
-      const latest = latestDeptAudit(completed, allFindings, depts, d.code);
-      const counts = (latest && latest.auditFindingCountsFrozen) || auditFindingCounts(allFindings.filter(f => f.dept === d.code));
-      const score = latest ? frozenAuditScore(latest) : null;
-      return { counts, score, total: counts.total, date: latest ? auditDateText(latest) : (d.lastAudit || 'Not audited') };
-    }
-    const df = dateFindings.filter(f => f.dept === d.code);
-    const counts = auditFindingCounts(df);
+    // One scoring path for every status filter: the average of the latest on-portal audit and
+    // the latest imported external audit (identical to Dashboard / Analytics).
     const info = latestDeptAuditScore(completed, allFindings, depts, d.code);
     const score = info && typeof info.score === 'number' ? info.score : null;
-    return { counts, score, total: df.length, date: info && info.audit ? auditDateText(info.audit) : (d.lastAudit || 'Not audited') };
+    const internalScore = info && typeof info.internalScore === 'number' ? info.internalScore : null;
+    const externalScore = info && typeof info.externalScore === 'number' ? info.externalScore : null;
+    const date = info && info.audit ? auditDateText(info.audit) : (d.lastAudit || 'Not audited');
+    if (statusFilter === 'completed') {
+      const counts = (info && info.counts) || auditFindingCounts(allFindings.filter(f => findingMatchesDeptCode(depts, f, d.code)));
+      return { counts, score, internalScore, externalScore, total: counts.total, date };
+    }
+    const df = dateFindings.filter(f => findingMatchesDeptCode(depts, f, d.code));
+    return { counts: auditFindingCounts(df), score, internalScore, externalScore, total: df.length, date };
   };
+
+  const scoreBreakdown = (internalScore, externalScore) => (
+    internalScore !== null && externalScore !== null
+      ? `On-portal ${internalScore}% + External ${externalScore}% (average)`
+      : externalScore !== null ? `External audit ${externalScore}%` : internalScore !== null ? `On-portal audit ${internalScore}%` : '');
+  const sourceLabel = (f) => (f.externalAudit ? 'External' : 'On-portal');
 
   const activeStdLabel = standards.map(id => AUDIT_STANDARDS.find(s => s.id === id)?.label || id).join(' + ');
 
-  const deptFindings = (code) => dateFindings.filter(f => f.dept === code);
+  const deptFindings = (code) => dateFindings.filter(f => findingMatchesDeptCode(depts, f, code));
+
+  const toggleDept = (code) => {
+    setDeptFilters(current => current.some(selectedCode => deptValuesMatch(depts, selectedCode, code))
+      ? current.filter(selectedCode => !deptValuesMatch(depts, selectedCode, code))
+      : [...current, code]);
+  };
 
   const genDeptPDF = (d) => {
     if (!window.jspdf) { showToast('PDF loading...'); return; }
     const { jsPDF } = window.jspdf;
     const doc = new jsPDF();
     const pw = doc.internal.pageSize.getWidth();
-    const { counts, score } = cardData(d);
+    const { counts, score, internalScore, externalScore } = cardData(d);
     const df = deptFindings(d.code);
+    const hasExternal = externalScore !== null || df.some(f => f.externalAudit);
     doc.setFillColor(192, 57, 43); doc.rect(0, 0, pw, 28, 'F');
     doc.setTextColor(255); doc.setFontSize(15); doc.setFont('helvetica', 'bold');
     doc.text('OnePWS Pvt. Ltd.', pw / 2, 11, { align: 'center' });
     doc.setFontSize(9); doc.setFont('helvetica', 'normal');
-    doc.text('Internal Quality Audit Report — ' + d.name, pw / 2, 18, { align: 'center' });
+    doc.text((hasExternal ? 'Quality Audit Report (On-portal + External) — ' : 'Internal Quality Audit Report — ') + d.name, pw / 2, 18, { align: 'center' });
     doc.setFontSize(7);
     doc.text('SPOC: ' + (d.spoc || 'TBD') + ' | Date: ' + new Date().toLocaleDateString() + ' | Standards: ' + activeStdLabel, pw / 2, 24, { align: 'center' });
     doc.setTextColor(30, 30, 50);
     doc.autoTable({
-      startY: 34, head: [['Audit Score', 'Critical', 'Major', 'Minor', 'Observation']],
-      body: [[score === null ? 'N/A' : score + '%', counts.critical, counts.major, counts.minor, counts.obs]],
+      startY: 34, head: [['Audit Score', 'On-portal', 'External', 'Critical', 'Major', 'Minor', 'Observation']],
+      body: [[score === null ? 'N/A' : score + '%', internalScore === null ? '-' : internalScore + '%', externalScore === null ? '-' : externalScore + '%', counts.critical, counts.major, counts.minor, counts.obs]],
       styles: { fontSize: 9, halign: 'center' }, headStyles: { fillColor: [37, 99, 235], textColor: 255 }, margin: { left: 14, right: 14 },
     });
+    if (internalScore !== null && externalScore !== null) {
+      doc.setFontSize(7); doc.setTextColor(90);
+      doc.text('Audit Score = average of the latest on-portal audit score and the latest imported external audit score.', 14, doc.lastAutoTable.finalY + 5);
+      doc.setTextColor(30, 30, 50);
+    }
     doc.autoTable({
-      startY: doc.lastAutoTable.finalY + 8, head: [['ID', 'Description', 'Severity', 'Clause', 'Status']],
-      body: df.map(f => [f.ref, f.desc, SEV_LABEL[f.sev] || f.sev, f.clause, STAT_LABEL[f.status] || f.status]),
-      styles: { fontSize: 8 }, headStyles: { fillColor: [192, 57, 43], textColor: 255 }, margin: { left: 14, right: 14 },
+      startY: doc.lastAutoTable.finalY + 9, head: [['ID', 'Source', 'Description', 'Severity', 'Owner', 'Due', 'Status']],
+      body: df.map(f => [f.ref, f.externalAudit ? 'External' + (f.auditRef ? ' (' + f.auditRef + ')' : '') : 'On-portal', f.desc, SEV_LABEL[f.sev] || f.sev, f.responsibleOwner || '-', f.due || '-', STAT_LABEL[f.status] || f.status]),
+      styles: { fontSize: 7.5 }, headStyles: { fillColor: [192, 57, 43], textColor: 255 }, margin: { left: 14, right: 14 },
     });
     doc.save('OnePWS_' + d.code + '_Report_' + Date.now() + '.pdf');
     showToast('PDF downloaded');
@@ -100,7 +140,7 @@ export default function Reports({ dateFrom, dateTo }) {
     const XLSX = window.XLSX;
     const df = deptFindings(d.code);
     const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(df.map(f => ({ ID: f.ref, Description: f.desc, Severity: SEV_LABEL[f.sev] || f.sev, Clause: f.clause, Due: f.due, Status: STAT_LABEL[f.status] || f.status }))), d.code);
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(df.map(f => ({ ID: f.ref, Source: sourceLabel(f), 'Audit Ref': f.auditRef || '', Topic: f.topic || '', Description: f.desc, Severity: SEV_LABEL[f.sev] || f.sev, Clause: f.clause, Owner: f.responsibleOwner || '', Due: f.due, Status: STAT_LABEL[f.status] || f.status }))), d.code);
     XLSX.writeFile(wb, 'OnePWS_' + d.code + '_Report_' + Date.now() + '.xlsx');
     showToast('Excel downloaded');
   };
@@ -150,11 +190,13 @@ export default function Reports({ dateFrom, dateTo }) {
         <div className="card-heading"><span className="dot w-[7px] h-[7px] rounded-full bg-[var(--accent)] flex-shrink-0" />Department-wise Reports</div>
         <div className="flex gap-1 flex-wrap">
           {!isSpoc && (
-            <span className={`badge ${deptFilter === 'all' ? 'b-brand' : 'b-gray'}`} style={{ cursor: 'pointer', padding: '5px 10px', fontSize: 11 }} onClick={() => setDeptFilter('all')}>All Depts</span>
+            <span className={`badge ${deptFilters.length === 0 ? 'b-brand' : 'b-gray'}`} style={{ cursor: 'pointer', padding: '5px 10px', fontSize: 11 }} onClick={() => setDeptFilters([])}>All Depts</span>
           )}
-          {(isSpoc ? depts.filter(d => d.code === currentUser?.dept) : depts).map(d => (
-            <span key={d.code} className={`badge ${deptFilter === d.code ? 'b-brand' : 'b-gray'}`} style={{ cursor: 'pointer', padding: '5px 10px', fontSize: 11 }} onClick={() => setDeptFilter(d.code)}>{d.code}</span>
-          ))}
+          {(isSpoc ? depts.filter(d => deptValuesMatch(depts, d.code, currentUser?.dept) || deptValuesMatch(depts, d.name, currentUser?.dept)) : depts).map(d => {
+            const selectedDept = deptFilters.some(code => deptValuesMatch(depts, code, d.code));
+            const hasData = reportDeptHasData(d);
+            return <span key={d.code} title={hasData ? '' : 'No report data for the current status filter'} className={`badge ${selectedDept ? 'b-brand' : 'b-gray'}`} style={{ cursor: 'pointer', padding: '5px 10px', fontSize: 11, opacity: hasData ? 1 : 0.45 }} onClick={() => toggleDept(d.code)}>{d.code}</span>;
+          })}
         </div>
       </div>
 
@@ -164,7 +206,7 @@ export default function Reports({ dateFrom, dateTo }) {
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
           {reportDeptList.map(d => {
-            const { counts, score, total, date } = cardData(d);
+            const { counts, score, total, date, internalScore, externalScore } = cardData(d);
             const c = counts.critical, ma = counts.major, mi = counts.minor, ob = counts.obs;
             const sc = score === null ? 'text3' : auditScoreColorVar(score);
             return (
@@ -181,6 +223,9 @@ export default function Reports({ dateFrom, dateTo }) {
                     <span style={{ color: 'var(--red)' }}>{c}C</span><span style={{ color: 'var(--amber)' }}>{ma}M</span><span style={{ color: 'var(--teal)' }}>{mi}m</span><span style={{ color: 'var(--purple)' }}>{ob}O</span>
                   </div>
                 </div>
+                {scoreBreakdown(internalScore, externalScore) && (
+                  <div className="text-[10px] mt-1" style={{ color: 'var(--text3)' }}>{scoreBreakdown(internalScore, externalScore)}</div>
+                )}
                 <div style={{ marginTop: 9, paddingTop: 9, borderTop: '1px solid var(--border)', display: 'flex', gap: 5 }}>
                   <button className="btn btn-ghost btn-sm" style={{ flex: 1 }} onClick={e => { e.stopPropagation(); genDeptPDF(d); }}><Icon name="file-text" /> PDF</button>
                   <button className="btn btn-ghost btn-sm" style={{ flex: 1 }} onClick={e => { e.stopPropagation(); genDeptExcel(d); }}><Icon name="table" /> Excel</button>
@@ -194,7 +239,7 @@ export default function Reports({ dateFrom, dateTo }) {
       {/* Dept report preview */}
       {selected && (() => {
         const d = depts.find(x => x.code === selected); if (!d) return null;
-        const { counts, score } = cardData(d);
+        const { counts, score, internalScore, externalScore } = cardData(d);
         const sc = score === null ? 'text3' : auditScoreColorVar(score);
         const df = deptFindings(d.code);
         const latest = latestDeptAudit(completed, allFindings, depts, d.code);
@@ -219,20 +264,25 @@ export default function Reports({ dateFrom, dateTo }) {
                 </div>
               ))}
             </div>
+            {scoreBreakdown(internalScore, externalScore) && (
+              <div className="text-[10px] mb-3" style={{ color: 'var(--text3)' }}>Audit Score basis: {scoreBreakdown(internalScore, externalScore)}</div>
+            )}
             <div className="card-heading"><span className="dot w-[7px] h-[7px] rounded-full bg-[var(--red)] flex-shrink-0" />Non-Conformances ({df.length})</div>
             <div className="table-wrap mb-3">
               <table>
-                <thead><tr><th>ID</th><th>Description</th><th>Severity</th><th>Clause</th><th>Status</th></tr></thead>
+                <thead><tr><th>ID</th><th>Source</th><th>Description</th><th>Severity</th><th>Owner</th><th>Clause</th><th>Status</th></tr></thead>
                 <tbody>
                   {df.length ? df.map(f => (
                     <tr key={f.id || f.ref}>
                       <td className="font-bold">{f.ref}</td>
+                      <td><Badge type={f.externalAudit ? 'b-purple' : 'b-gray'}>{f.externalAudit ? 'External' : 'On-portal'}</Badge></td>
                       <td style={{ maxWidth: 280 }}>{sanitize(f.desc || '')}</td>
                       <td><Badge type={SEV_BADGE[f.sev]}>{SEV_LABEL[f.sev]}</Badge></td>
+                      <td>{sanitize(f.responsibleOwner || '-')}</td>
                       <td><Badge type="b-blue">{f.clause}</Badge></td>
                       <td><Badge type={STAT_BADGE[f.status]}>{STAT_LABEL[f.status]}</Badge></td>
                     </tr>
-                  )) : <tr><td colSpan={5} style={{ textAlign: 'center', color: 'var(--text3)', padding: 12 }}>No non-conformances</td></tr>}
+                  )) : <tr><td colSpan={7} style={{ textAlign: 'center', color: 'var(--text3)', padding: 12 }}>No non-conformances</td></tr>}
                 </tbody>
               </table>
             </div>

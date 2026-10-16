@@ -121,13 +121,15 @@ function isReviewedOrClosedFinding(f) { return hasReviewDecision(f) || String((f
 
 function parseAuditTimestamp(value) {
   const raw = String(value||'').trim(); if (!raw) return 0;
-  const direct = Date.parse(raw); if (Number.isFinite(direct)) return direct;
-  const m = raw.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{4})(?:,\s*(\d{1,2}):(\d{2})(?::(\d{2}))?\s*([AP]M|am|pm)?)?/);
-  if (!m) return 0;
-  let h = Number(m[4]||0); const mi=Number(m[5]||0), s=Number(m[6]||0), ap=String(m[7]||'').toLowerCase();
-  if (ap==='pm' && h<12) h+=12; if (ap==='am' && h===12) h=0;
-  const t = new Date(Number(m[3]),Number(m[2])-1,Number(m[1]),h,mi,s).getTime();
-  return Number.isFinite(t) ? t : 0;
+  const m = raw.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{4})(?:,\s*(\d{1,2}):(\d{2})(?::(\d{2}))?\s*([AP]M|am|pm)?)?$/);
+  if (m) {
+    let h = Number(m[4]||0); const mi=Number(m[5]||0), s=Number(m[6]||0), ap=String(m[7]||'').toLowerCase();
+    if (ap==='pm' && h<12) h+=12; if (ap==='am' && h===12) h=0;
+    const t = new Date(Number(m[3]),Number(m[2])-1,Number(m[1]),h,mi,s).getTime();
+    if (Number.isFinite(t)) return t;
+  }
+  const direct = Date.parse(raw);
+  return Number.isFinite(direct) ? direct : 0;
 }
 
 function isClosureSubmissionAction(a) { return /(closure submitted|submitted for review|submitted closure)/i.test(String(a||'')); }
@@ -302,18 +304,33 @@ function normalizeAuditSeverity(sev) {
 }
 function auditFindingCounts(findings) {
   const c={critical:0,major:0,minor:0,obs:0,total:0};
-  (Array.isArray(findings)?findings:[]).forEach(f=>{const k=normalizeAuditSeverity(f&&(f.sev??f.severity));c[k]++;c.total++;});
+  (Array.isArray(findings)?findings:[]).forEach(f=>{if(!isRealAuditFinding(f))return;const k=normalizeAuditSeverity(f&&(f.sev??f.severity));c[k]++;c.total++;});
   return c;
 }
+function isRealAuditFinding(f) {
+  if(!f||typeof f!=='object'||isDeletedFinding(f))return false;
+  return Boolean(String(f.desc||f.description||f.ref||'').trim());
+}
+function sessionAuditFindingRows(session,audit) {
+  const findings=session&&session.findings&&typeof session.findings==='object'?session.findings:{};
+  const answers=session&&session.answers&&typeof session.answers==='object'?session.answers:{};
+  const checkpointIds=new Set(((audit&&audit.sections)||[]).flatMap(s=>s&&Array.isArray(s._checkpoints)?s._checkpoints:[]).map(q=>String((q&&q.id)||'')).filter(Boolean));
+  return Object.entries(findings).filter(([qid,f])=>isRealAuditFinding(f)&&(Object.prototype.hasOwnProperty.call(answers,qid)?answers[qid]==='no':(!checkpointIds.size||checkpointIds.has(String(qid))))).map(([,f])=>f);
+}
 function auditScoreFromCounts(c) { return Math.min(100,Math.max(0,Math.round(100-(c.critical||0)*15-(c.major||0)*10-(c.minor||0)*5-(c.obs||0)*2))); }
-function completedAuditKey(a) { return String((a&&(a.ref||a.auditRef||a.id))||'').trim().toLowerCase(); }
+function completedAuditKey(a) {
+  // ref alone is not unique: one external audit report is imported once per department.
+  const ref = String((a&&(a.ref||a.auditRef||a.id))||'').trim().toLowerCase();
+  if (!ref) return '';
+  return a&&a.externalAudit ? `${ref}|${String(a.dept||'').trim().toLowerCase()}` : ref;
+}
 function completedAuditTime(a) { const t=Date.parse((a&&(a.updatedAt||a.submittedAt||a.date))||''); return Number.isFinite(t)?t:0; }
 function completedAuditCompleteness(a) {
   if(!a||typeof a!=='object')return 0;
   let s=a.auditScoreFrozen!==undefined?1:0;
   s+=Array.isArray(a.findingRefs)?a.findingRefs.length:0;
   if(a.auditFindingCountsFrozen&&typeof a.auditFindingCountsFrozen==='object')s+=Number(a.auditFindingCountsFrozen.total||0);
-  if(a.session&&a.session.findings)s+=Object.keys(a.session.findings).length;
+  if(a.session&&a.session.findings)s+=sessionAuditFindingRows(a.session,a).length;
   return s;
 }
 function isBadDerivedCompletedAudit(a) {
@@ -324,12 +341,14 @@ function isBadDerivedCompletedAudit(a) {
 function repairCompletedAuditScores(audits,findings) {
   const active=(Array.isArray(findings)?findings:[]).map(normalizeFindingSyncState).filter(f=>f&&!f.deletedAt&&!isDraftFindingLeak(f));
   return audits.map(audit=>{
+    if(!audit||audit.deletedAt)return audit;
     const ref=String((audit.ref||audit.auditRef||audit.id)||'').trim();
     const explicitRefs=new Set((audit.findingRefs||[]).map(String));
     const rows=active.filter(f=>(f.dept===audit.dept&&(String(f.auditRef||f.auditId||'')===ref||explicitRefs.has(String(f.ref||'')))));
-    if(!rows.length)return audit;
-    const counts=auditFindingCounts(rows);
-    return{...audit,findingRefs:rows.map(f=>f.ref).filter(Boolean),auditScoreFrozen:auditScoreFromCounts(counts),auditFindingCountsFrozen:counts,status:audit.status||'submitted'};
+    const scoreRows=rows.length?rows:sessionAuditFindingRows(audit.session,audit);
+    if(!scoreRows.length)return audit;
+    const counts=auditFindingCounts(scoreRows);
+    return{...audit,findingRefs:rows.length?rows.map(f=>f.ref).filter(Boolean):(audit.findingRefs||[]),auditScoreFrozen:auditScoreFromCounts(counts),auditFindingCountsFrozen:counts,status:audit.status||'submitted'};
   });
 }
 function mergeCompletedAuditsForSync(currentValue,incomingValue,findingsValue) {
@@ -360,5 +379,5 @@ module.exports = {
   SYNC_KEYS, assertSyncKey, syncValuesEqual, sanitizeSyncValueForClient,
   mergeEmailLogs, mergeUsersForSync, normalizeUserForStorage,
   mergeFindingsForSync, mergeNotificationsForSync, mergeAuditDraftsForSync,
-  mergeCompletedAuditsForSync
+  mergeCompletedAuditsForSync, repairCompletedAuditScores
 };

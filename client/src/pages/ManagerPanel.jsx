@@ -2,7 +2,7 @@ import React, { useMemo } from 'react';
 import { useApp } from '../context/AppContext';
 import { Card, Badge } from '../components/UI';
 import { SEV_BADGE, SEV_LABEL, STAT_BADGE, STAT_LABEL, sanitize, showToast } from '../utils/helpers';
-import { delayDays, managerDeptCodes } from '../utils/dashboardHelpers';
+import { delayDays, managerDeptCodes, findingMatchesDeptCode, deptCodeInList, deptValuesMatch } from '../utils/dashboardHelpers';
 
 export default function ManagerPanel() {
   const { getFindings, getDepts, getEmailMaster, currentUser, navigate, setCapaSelectedId, canAccess } = useApp();
@@ -13,12 +13,12 @@ export default function ManagerPanel() {
   const { codes, open, overdue, byDept } = useMemo(() => {
     const u = currentUser || {};
     const codes = managerDeptCodes(u, depts, emailMaster);
-    const managed = findings.filter(f => codes.includes(f.dept));
+    const managed = findings.filter(f => deptCodeInList(depts, f.dept, codes) || deptCodeInList(depts, f.deptName, codes));
     const open = managed.filter(f => f.status !== 'closed');
     const overdue = open.filter(f => delayDays(f) > 0);
     const byDept = codes.map(code => {
-      const d = depts.find(x => x.code === code) || { code, name: code };
-      const df = open.filter(f => f.dept === code);
+      const d = depts.find(x => deptValuesMatch(depts, x.code, code)) || { code, name: code };
+      const df = open.filter(f => findingMatchesDeptCode(depts, f, code));
       return {
         code, name: d.name,
         total: df.length,

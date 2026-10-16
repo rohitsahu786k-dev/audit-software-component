@@ -3,7 +3,7 @@ import { useApp } from '../context/AppContext';
 import { Badge } from '../components/UI';
 import { Icon } from '../components/UI';
 import { findingWorkflowStatus, showToast } from '../utils/helpers';
-import { delayDays, managerDeptCodes } from '../utils/dashboardHelpers';
+import { delayDays, managerDeptCodes, findingMatchesDeptCode, deptCodeInList } from '../utils/dashboardHelpers';
 
 export default function MyTasks() {
   const { getFindings, getDepts, getEmailMaster, getPlannedAudits, currentUser, navigate, setCapaSelectedId, refreshSync, setPageAction } = useApp();
@@ -33,7 +33,7 @@ export default function MyTasks() {
 
     if (role === 'spoc') {
       const spocDept = u.dept || '';
-      findings.filter(f => f.status !== 'closed' && f.dept === spocDept).forEach(f => {
+      findings.filter(f => f.status !== 'closed' && findingMatchesDeptCode(depts, f, spocDept)).forEach(f => {
         list.push({ id: f.id || f.ref, ref: f.ref, title: `CAPA Action Required: ${f.ref} - ${(f.desc || '').substring(0, 45)}`, status: dueBucket(f), dueDate: f.due, pri: pri(f), link: 'capa' });
       });
     } else if (role === 'auditor') {
@@ -45,7 +45,7 @@ export default function MyTasks() {
       });
     } else if (role === 'manager') {
       const codes = managerDeptCodes(u, depts, emailMaster);
-      findings.filter(f => codes.includes(f.dept) && f.status !== 'closed').forEach(f => {
+      findings.filter(f => (deptCodeInList(depts, f.dept, codes) || deptCodeInList(depts, f.deptName, codes)) && f.status !== 'closed').forEach(f => {
         const ws = findingWorkflowStatus(f);
         list.push({ id: f.id || f.ref, ref: f.ref, title: `Manager Follow-up: ${f.ref} - ${f.deptName || f.dept}`, status: delayDays(f) > 0 ? 'overdue' : ws === 'pending-closure' ? 'due-soon' : 'upcoming', dueDate: f.due || 'ASAP', pri: pri(f), link: 'capa' });
       });

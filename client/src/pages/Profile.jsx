@@ -22,7 +22,7 @@ export default function Profile() {
     if (!name) { showToast('Name required'); return; }
     if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { showToast('Valid email required'); return; }
     if ((form.pw || form.pw2) && form.pw !== form.pw2) { showToast('Passwords do not match'); return; }
-    if (form.pw && form.pw.length < 6) { showToast('Password must be at least 6 characters'); return; }
+    if (form.pw && form.pw.length < 8) { showToast('Password must be at least 8 characters'); return; }
 
     setSaving(true);
     const payload = { name, email, dept: form.dept };

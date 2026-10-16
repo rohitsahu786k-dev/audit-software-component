@@ -2,7 +2,7 @@ import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { useApp } from '../context/AppContext';
 import { Card, Badge, Icon, EvidenceUploader } from '../components/UI';
 import { SEV_BADGE, SEV_LABEL, STAT_BADGE, STAT_LABEL, showToast, today, sanitize, findingWorkflowStatus, mediaUrl, isImageMedia } from '../utils/helpers';
-import { managerDeptCodes, filterFindingsByDateRange } from '../utils/dashboardHelpers';
+import { managerDeptCodes, filterFindingsByDateRange, findingMatchesDeptCode, deptCodeInList, deptValuesMatch } from '../utils/dashboardHelpers';
 
 const STEPS = ['Logged', 'In Progress', 'Submit For Review', 'Closed'];
 const STEP_INDEX = { open: 0, 'in-progress': 1, delayed: 1, 'pending-closure': 2, submitted: 2, closed: 3 };
@@ -44,15 +44,16 @@ export default function CAPA({ dateFrom, dateTo }) {
   const canSubmitClosure = role === 'spoc' || role === 'admin';
   const canReview = role === 'auditor' || role === 'admin';
   const canEditDue = role === 'admin' || role === 'auditor';
-  const canEditRecord = (f) => role === 'admin' || role === 'auditor' || (role === 'manager' && codes.includes(f?.dept));
-  const canDeleteRecord = (f) => role === 'admin' || (role === 'auditor' && settings.allowAuditorsDeleteFindings) || (role === 'manager' && codes.includes(f?.dept));
+  const isManagedFinding = (f) => deptCodeInList(depts, f?.dept, codes) || deptCodeInList(depts, f?.deptName, codes);
+  const canEditRecord = (f) => role === 'admin' || role === 'auditor' || (role === 'manager' && isManagedFinding(f));
+  const canDeleteRecord = (f) => role === 'admin' || (role === 'auditor' && settings.allowAuditorsDeleteFindings) || (role === 'manager' && isManagedFinding(f));
 
   const scoped = useMemo(() => {
     let list = filterFindingsByDateRange(findings, dateFrom, dateTo);
-    if (role === 'spoc') list = list.filter(f => f.dept === currentUser?.dept);
-    else if (role === 'manager') list = list.filter(f => codes.includes(f.dept));
+    if (role === 'spoc') list = list.filter(f => findingMatchesDeptCode(depts, f, currentUser?.dept));
+    else if (role === 'manager') list = list.filter(f => deptCodeInList(depts, f?.dept, codes) || deptCodeInList(depts, f?.deptName, codes));
     return list.slice().sort((a, b) => capaSortRank(a) - capaSortRank(b) || (Date.parse(a.due || 0) - Date.parse(b.due || 0)) || String(a.ref || '').localeCompare(String(b.ref || '')));
-  }, [findings, dateFrom, dateTo, role, currentUser, codes]);
+  }, [findings, depts, dateFrom, dateTo, role, currentUser, codes]);
 
   const open = scoped.filter(f => f.status !== 'closed');
 
@@ -69,11 +70,11 @@ export default function CAPA({ dateFrom, dateTo }) {
     return scoped.filter(f => {
       const ws = findingWorkflowStatus(f);
       if (statusF && ws !== statusF) return false;
-      if (deptF && f.dept !== deptF) return false;
+      if (deptF && !findingMatchesDeptCode(depts, f, deptF)) return false;
       if (q && ![f.ref, f.deptName, f.desc, f.clause].join(' ').toLowerCase().includes(q)) return false;
       return true;
     });
-  }, [scoped, search, statusF, deptF]);
+  }, [scoped, depts, search, statusF, deptF]);
 
   const commit = (updater, msg) => {
     const updated = findings.map(x => (x.id === active.id ? updater(x) : x));
@@ -151,7 +152,9 @@ export default function CAPA({ dateFrom, dateTo }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const deptOptions = role === 'spoc' ? depts.filter(d => d.code === currentUser?.dept) : role === 'manager' ? depts.filter(d => codes.includes(d.code)) : depts;
+  const deptOptions = role === 'spoc'
+    ? depts.filter(d => deptValuesMatch(depts, d.code, currentUser?.dept) || deptValuesMatch(depts, d.name, currentUser?.dept))
+    : role === 'manager' ? depts.filter(d => deptCodeInList(depts, d.code, codes)) : depts;
 
   const renderDetail = (f) => {
     const ws = findingWorkflowStatus(f);

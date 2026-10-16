@@ -4,7 +4,7 @@ const express = require('express');
 const router = express.Router();
 const { getCollection } = require('../lib/mongo');
 const { getMailer, parseRecipients, SMTP_FROM } = require('../lib/mailer');
-const { wrapAsync, requireAdmin } = require('../middleware/auth');
+const { wrapAsync, requireAdmin, requirePageAccess, actorOf } = require('../middleware/auth');
 const { mergeEmailLogs } = require('../lib/sync-helpers');
 const { emailSendLockKey, EMAIL_LOCK_PENDING_MS } = require('../lib/email-locks');
 const { runEmailAutomation } = require('../lib/email-engine');
@@ -19,10 +19,11 @@ function normalizeEmailLockItems(input) {
 }
 
 // GET /api/email/verify
-router.get('/verify', wrapAsync(async (_req, res) => {
+router.get('/verify', wrapAsync(async (req, res) => {
+  await requirePageAccess(req, 'masterdata');
   const transport = getMailer();
   const verified = await transport.verify();
-  res.json({ ok: true, smtp: Boolean(verified), user: process.env.SMTP_USER });
+  res.json({ ok: true, smtp: Boolean(verified) });
 }));
 
 // POST /api/email
@@ -38,7 +39,7 @@ router.post('/', wrapAsync(async (req, res) => {
   const text = String((req.body && req.body.text) || '').trim();
   const html = req.body && req.body.html ? String(req.body.html) : undefined;
   const attachments = Array.isArray(req.body && req.body.attachments)
-    ? req.body.attachments.filter(i => i && i.url).map(i => ({ filename: String(i.filename || 'attachment'), path: String(i.url) }))
+    ? req.body.attachments.filter(i => i && typeof i.url === 'string' && /^https:\/\//i.test(i.url)).map(i => ({ filename: String(i.filename || 'attachment'), path: String(i.url) }))
     : [];
   if (!to.length) return res.status(400).json({ ok: false, error: 'At least one recipient is required' });
   if (!subject) return res.status(400).json({ ok: false, error: 'Subject is required' });
@@ -54,7 +55,7 @@ router.post('/', wrapAsync(async (req, res) => {
 router.post('/run', wrapAsync(async (req, res) => {
   requireAdmin(req);
   const dryRun = Boolean(req.body && req.body.dryRun);
-  const by = String((req.body && req.body.by) || 'manual');
+  const by = actorOf(req);
   const summary = await runEmailAutomation({ by, dryRun });
   res.json(summary);
 }));
@@ -67,7 +68,7 @@ router.post('/log', wrapAsync(async (req, res) => {
   const current = await collection.findOne({ key: 'ap_email_logs' });
   const now = new Date();
   const value = mergeEmailLogs(current && current.value, [log], current && current.clearedAt);
-  await collection.updateOne({ key: 'ap_email_logs' }, { $set: { key: 'ap_email_logs', value, updatedAt: now, updatedBy: (req.body && req.body.by) || 'email-log', clearedAt: current && current.clearedAt ? current.clearedAt : null } }, { upsert: true });
+  await collection.updateOne({ key: 'ap_email_logs' }, { $set: { key: 'ap_email_logs', value, updatedAt: now, updatedBy: actorOf(req), clearedAt: current && current.clearedAt ? current.clearedAt : null } }, { upsert: true });
   res.json({ ok: true, count: value.length, value });
 }));
 
@@ -78,7 +79,7 @@ router.post('/locks/claim', wrapAsync(async (req, res) => {
   const collection = await getCollection();
   const now = new Date();
   const pendingUntil = new Date(now.getTime() + EMAIL_LOCK_PENDING_MS);
-  const claimedBy = String((req.body && req.body.by) || 'browser').slice(0, 80);
+  const claimedBy = actorOf(req).slice(0, 80);
   const results = [];
   for (const item of locks) {
     const key = emailSendLockKey(item.key);
@@ -105,7 +106,7 @@ router.post('/locks/commit', wrapAsync(async (req, res) => {
   const collection = await getCollection();
   const now = new Date();
   const success = Boolean(req.body && req.body.success);
-  const committedBy = String((req.body && req.body.by) || 'browser').slice(0, 80);
+  const committedBy = actorOf(req).slice(0, 80);
   const pendingUntil = new Date(0);
   const results = [];
   for (const item of locks) {

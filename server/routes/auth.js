@@ -1,141 +1,148 @@
 'use strict';
 
+// Account routes that sit beside Auth.js. Sign-in, sign-out, session and CSRF are owned by
+// Auth.js (lib/authjs.js, mounted after this router); this file covers profile, password
+// reset and the current-user lookup.
+
 const express = require('express');
 const router = express.Router();
 const crypto = require('crypto');
-const { getUsersRecord, findUserByIdentity, verifyPassword, publicUser, createAuthToken, AUTH_TOKEN_TTL_MS, hashPassword, hashOtp, wrapAsync, requireAdmin } = require('../middleware/auth');
+const { wrapAsync, requireAdmin, invalidateAuthCaches, actorOf } = require('../middleware/auth');
+const { findUserByIdentity, publicUser } = require('../lib/identity');
+const { hashOtp, safeEqual, passwordProblem, verifyPassword } = require('../lib/password');
+const { normalizeUserForStorage } = require('../lib/sync-helpers');
+const { getFreshUsersRecord } = require('../lib/user-store');
+const { saveOtp, deleteOtp, consumeAttempt } = require('../lib/otp-store');
+const { issueSessionCookie } = require('../lib/authjs');
+const limiter = require('../lib/rate-limit');
 const { getMailer } = require('../lib/mailer');
-const { getCollection } = require('../lib/mongo');
 
 const SMTP_FROM = process.env.SMTP_FROM || (process.env.SMTP_USER ? `OnePWS AuditPro <${process.env.SMTP_USER}>` : undefined);
+const RESET_WINDOW_MS = 15 * 60 * 1000;
+const MAX_RESET_REQUESTS_PER_IDENTITY = 3;
+const MAX_RESET_REQUESTS_PER_IP = 15;
+const MAX_RESET_ATTEMPTS_PER_IP = 30;
+const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const HTML_ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+const escapeHtml = value => String(value || '').replace(/[&<>"']/g, c => HTML_ESCAPES[c]);
 
-function normalizeUserForStorage(user, existing) {
-  if (!user || typeof user !== 'object') return user;
-  const next = { ...(existing || {}), ...user };
-  const password = Object.prototype.hasOwnProperty.call(user, 'password') ? String(user.password || '') : '';
-  if (password) {
-    next.passwordHash = hashPassword(password);
-    delete next.legacyPasswordHashes; delete next.legacyPasswords;
-  } else if (existing && existing.passwordHash) {
-    next.passwordHash = existing.passwordHash;
-  } else if (existing && existing.password) {
-    next.passwordHash = hashPassword(existing.password);
-  }
-  delete next.password;
-  return next;
+async function saveUsers(collection, nextUsers, updatedBy) {
+  const now = new Date();
+  await collection.updateOne({ key: 'ap_users' }, { $set: { key: 'ap_users', value: nextUsers, updatedAt: now, updatedBy } }, { upsert: true });
+  invalidateAuthCaches();
+  return now;
 }
-
-async function getPasswordResetRows(collection) {
-  const row = await collection.findOne({ key: '_password_reset_otps' });
-  return Array.isArray(row && row.value) ? row.value : [];
-}
-async function savePasswordResetOtp(collection, userId, otpHash, expiresAt) {
-  const now = Date.now();
-  const rows = (await getPasswordResetRows(collection)).filter(r => r && r.userId !== userId && Number(r.expiresAt) > now);
-  rows.push({ userId, otpHash, expiresAt, attempts: 0 });
-  await collection.updateOne({ key: '_password_reset_otps' }, { $set: { key: '_password_reset_otps', value: rows, updatedAt: new Date(), updatedBy: 'password-reset' } }, { upsert: true });
-}
-async function updatePasswordResetOtp(collection, userId, patch) {
-  const rows = (await getPasswordResetRows(collection)).map(r => r && r.userId === userId ? Object.assign({}, r, patch) : r);
-  await collection.updateOne({ key: '_password_reset_otps' }, { $set: { key: '_password_reset_otps', value: rows, updatedAt: new Date(), updatedBy: 'password-reset' } }, { upsert: true });
-}
-async function deletePasswordResetOtp(collection, userId) {
-  const rows = (await getPasswordResetRows(collection)).filter(r => r && r.userId !== userId);
-  await collection.updateOne({ key: '_password_reset_otps' }, { $set: { key: '_password_reset_otps', value: rows, updatedAt: new Date(), updatedBy: 'password-reset' } }, { upsert: true });
-}
-
-// POST /api/auth/login
-router.post('/login', wrapAsync(async (req, res) => {
-  const identity = String((req.body && req.body.identity) || '').trim().toLowerCase();
-  const password = String((req.body && req.body.password) || '');
-  if (!identity || !password) return res.status(400).json({ ok: false, error: 'Login ID and password are required' });
-  const { collection, users } = await getUsersRecord();
-  const user = findUserByIdentity(users, identity);
-  if (!user || !verifyPassword(user, password)) return res.status(401).json({ ok: false, error: 'Invalid credentials' });
-  if (!user.passwordHash && user.password) {
-    const nextUsers = users.map(r => r && r.id === user.id ? normalizeUserForStorage(r, r) : r);
-    await collection.updateOne({ key: 'ap_users' }, { $set: { key: 'ap_users', value: nextUsers, updatedAt: new Date(), updatedBy: 'password-hash-migration' } }, { upsert: true });
-  }
-  res.json({ ok: true, token: createAuthToken(user), user: publicUser(user), expiresInMs: AUTH_TOKEN_TTL_MS });
-}));
 
 // GET /api/auth/me
-router.get('/me', wrapAsync(async (req, res) => {
-  if (!req.authUser) return res.status(401).json({ ok: false, error: 'Authentication required' });
+router.get('/me', (req, res) => {
   res.json({ ok: true, user: publicUser(req.authUser) });
-}));
+});
 
 // PUT /api/auth/profile
 router.put('/profile', wrapAsync(async (req, res) => {
   const patch = req.body || {};
-  const name = String(patch.name || '').trim();
-  const email = String(patch.email || '').trim();
-  const dept = String(patch.dept || '').trim();
+  const name = String(patch.name || '').trim().slice(0, 120);
+  const email = String(patch.email || '').trim().slice(0, 200);
+  const dept = String(patch.dept || '').trim().slice(0, 120);
   const password = Object.prototype.hasOwnProperty.call(patch, 'password') ? String(patch.password || '') : '';
   if (!name) return res.status(400).json({ ok: false, error: 'Name is required' });
-  if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return res.status(400).json({ ok: false, error: 'Valid email is required' });
-  if (password && password.length < 6) return res.status(400).json({ ok: false, error: 'Password must be at least 6 characters' });
-  const { collection, users } = await getUsersRecord();
+  if (email && !EMAIL_PATTERN.test(email)) return res.status(400).json({ ok: false, error: 'Valid email is required' });
+  if (password && passwordProblem(password)) return res.status(400).json({ ok: false, error: passwordProblem(password) });
+  const { collection, users } = await getFreshUsersRecord();
   const idx = users.findIndex(u => u && String(u.id || '') === String(req.authUser.id || ''));
   if (idx < 0) return res.status(404).json({ ok: false, error: 'Account not found' });
   const current = users[idx];
   const nextUser = normalizeUserForStorage({ ...current, name, email, dept, avatar: name.substring(0, 2).toUpperCase(), ...(password ? { password } : {}) }, current);
   const nextUsers = users.slice(); nextUsers[idx] = nextUser;
-  const now = new Date();
-  await collection.updateOne({ key: 'ap_users' }, { $set: { key: 'ap_users', value: nextUsers, updatedAt: now, updatedBy: current.loginId || 'profile-update' } }, { upsert: true });
-  res.json({ ok: true, user: publicUser(nextUser), updatedAt: now });
+  const updatedAt = await saveUsers(collection, nextUsers, current.loginId || 'profile-update');
+  if (password) await issueSessionCookie(req, res, nextUser);
+  res.json({ ok: true, user: publicUser(nextUser), updatedAt });
+}));
+
+// POST /api/auth/admin-reset-password
+// Immediate, server-confirmed reset for the Admin Panel. Signs the target user out everywhere.
+router.post('/admin-reset-password', wrapAsync(async (req, res) => {
+  requireAdmin(req);
+  const userId = String((req.body && req.body.userId) || '').trim();
+  const password = String((req.body && req.body.password) || '');
+  if (!userId || !password) return res.status(400).json({ ok: false, error: 'User and password are required' });
+  if (passwordProblem(password)) return res.status(400).json({ ok: false, error: passwordProblem(password) });
+  const { collection, users } = await getFreshUsersRecord();
+  const index = users.findIndex(user => user && String(user.id || '') === userId);
+  if (index < 0) return res.status(404).json({ ok: false, error: 'User not found' });
+  const nextUsers = users.slice();
+  nextUsers[index] = normalizeUserForStorage({ ...users[index], password }, users[index]);
+  const updatedAt = await saveUsers(collection, nextUsers, actorOf(req));
+  res.json({ ok: true, userId, updatedAt });
+}));
+
+// POST /api/auth/verify-password
+// Re-authentication gate for destructive admin actions (e.g. "reset all data"). Admin
+// only, and failures count toward the same lockout as sign-in.
+router.post('/verify-password', wrapAsync(async (req, res) => {
+  requireAdmin(req);
+  const who = String(req.authUser.id || req.authUser.loginId);
+  if (await limiter.count('login-id', who) >= 5) return res.status(429).json({ ok: false, error: 'Too many attempts. Please try again later.' });
+  if (!verifyPassword(req.authUser, String((req.body && req.body.password) || ''))) {
+    await limiter.hit('login-id', who, RESET_WINDOW_MS);
+    return res.status(403).json({ ok: false, error: 'Incorrect password' });
+  }
+  await limiter.clear('login-id', who);
+  res.json({ ok: true });
 }));
 
 // POST /api/auth/forgot-password
+// Answers identically whether or not the account exists, so it cannot be used to discover
+// valid login IDs or emails. Rate limited per identity and per IP.
 router.post('/forgot-password', wrapAsync(async (req, res) => {
-  const identity = String((req.body && req.body.identity) || '').trim().toLowerCase();
+  const identity = String((req.body && req.body.identity) || '').trim().toLowerCase().slice(0, 200);
   if (!identity) return res.status(400).json({ ok: false, error: 'Login ID or email is required' });
-  const { collection, users } = await getUsersRecord();
-  const user = findUserByIdentity(users, identity);
-  if (!user || !user.email) return res.status(404).json({ ok: false, error: 'No active account found with a registered email' });
-  const otp = String(crypto.randomInt(100000, 1000000));
-  await savePasswordResetOtp(collection, user.id, hashOtp(user.id, otp), Date.now() + 15 * 60 * 1000);
-  const transport = getMailer();
-  const subject = 'OnePWS AuditPro password reset OTP';
-  const text = `Hello ${user.name||user.loginId},\n\nYour OTP is ${otp}. Valid for 15 minutes.\n\nIf you did not request this, ignore this email.`;
-  const html = `<p>Hello ${user.name||user.loginId},</p><p>Your OTP is <strong style="font-size:18px;letter-spacing:3px">${otp}</strong>. Valid for 15 minutes.</p><p>If you did not request this, ignore this email.</p>`;
-  try {
-    await transport.sendMail({ from: SMTP_FROM, to: user.email, subject, text, html });
-  } catch (err) {
-    await deletePasswordResetOtp(collection, user.id);
-    err.statusCode = 502; err.message = `Password reset email could not be sent: ${err.message}`; throw err;
+  const [perIdentity, perIp] = await Promise.all([limiter.hit('reset-req-id', identity, RESET_WINDOW_MS), limiter.hit('reset-req-ip', req.ip, RESET_WINDOW_MS)]);
+  if (perIdentity > MAX_RESET_REQUESTS_PER_IDENTITY || perIp > MAX_RESET_REQUESTS_PER_IP) {
+    return res.status(429).json({ ok: false, error: 'Too many requests. Please try again later.' });
   }
-  res.json({ ok: true, maskedEmail: user.email.replace(/^(.).+(@.+)$/, '$1***$2') });
+  const generic = { ok: true, message: 'If an account with a registered email exists, an OTP has been sent.' };
+  const { users } = await getFreshUsersRecord();
+  const user = findUserByIdentity(users, identity);
+  if (!user || !user.email) return res.json(generic);
+  const otp = String(crypto.randomInt(100000, 1000000));
+  await saveOtp(user.id, hashOtp(user.id, otp));
+  const display = escapeHtml(user.name || user.loginId);
+  try {
+    await getMailer().sendMail({
+      from: SMTP_FROM, to: user.email, subject: 'OnePWS AuditPro password reset OTP',
+      text: `Hello ${user.name || user.loginId},\n\nYour OTP is ${otp}. Valid for 15 minutes.\n\nIf you did not request this, ignore this email.`,
+      html: `<p>Hello ${display},</p><p>Your OTP is <strong style="font-size:18px;letter-spacing:3px">${otp}</strong>. Valid for 15 minutes.</p><p>If you did not request this, ignore this email.</p>`,
+    });
+  } catch (err) {
+    await deleteOtp(user.id);
+    console.error('[AuditPro] Password reset email failed:', err.message);
+    return res.status(502).json({ ok: false, error: 'Password reset email could not be sent. Please contact your administrator.' });
+  }
+  res.json(generic);
 }));
 
 // POST /api/auth/reset-password
 router.post('/reset-password', wrapAsync(async (req, res) => {
-  const identity = String((req.body && req.body.identity) || '').trim().toLowerCase();
+  const identity = String((req.body && req.body.identity) || '').trim().toLowerCase().slice(0, 200);
   const otp = String((req.body && req.body.otp) || '').trim();
   const password = String((req.body && req.body.password) || (req.body && req.body.newPassword) || '');
   if (!identity || !otp || !password) return res.status(400).json({ ok: false, error: 'Identity, OTP and password are required' });
-  if (password.length < 6) return res.status(400).json({ ok: false, error: 'Password must be at least 6 characters' });
-  const { collection, users } = await getUsersRecord();
+  if (passwordProblem(password)) return res.status(400).json({ ok: false, error: passwordProblem(password) });
+  if (await limiter.hit('reset-try-ip', req.ip, RESET_WINDOW_MS) > MAX_RESET_ATTEMPTS_PER_IP) {
+    return res.status(429).json({ ok: false, error: 'Too many attempts. Please try again later.' });
+  }
+  const { collection, users } = await getFreshUsersRecord();
   const user = findUserByIdentity(users, identity);
-  if (!user) return res.status(404).json({ ok: false, error: 'No active account found' });
-  const resets = await getPasswordResetRows(collection);
-  const reset = resets.find(r => r && r.userId === user.id);
-  if (!reset || reset.expiresAt < Date.now()) {
-    await deletePasswordResetOtp(collection, user.id);
-    return res.status(400).json({ ok: false, error: 'OTP expired. Please request a new OTP' });
-  }
-  reset.attempts += 1;
-  if (reset.attempts > 5) {
-    await deletePasswordResetOtp(collection, user.id);
-    return res.status(429).json({ ok: false, error: 'Too many OTP attempts. Please request a new OTP' });
-  }
-  await updatePasswordResetOtp(collection, user.id, { attempts: reset.attempts });
-  if (reset.otpHash !== hashOtp(user.id, otp)) return res.status(400).json({ ok: false, error: 'Invalid OTP' });
-  const nextUsers = users.map(r => r && r.id === user.id ? normalizeUserForStorage({ ...r, password }, r) : r);
-  const now = new Date();
-  await collection.updateOne({ key: 'ap_users' }, { $set: { key: 'ap_users', value: nextUsers, updatedAt: now, updatedBy: 'password-reset' } }, { upsert: true });
-  await deletePasswordResetOtp(collection, user.id);
-  res.json({ ok: true, userId: user.id, loginId: user.loginId, updatedAt: now });
+  const invalid = () => res.status(400).json({ ok: false, error: 'Invalid or expired OTP' });
+  if (!user) return invalid();
+  const attempt = await consumeAttempt(user.id);
+  if (attempt.status === 'locked') return res.status(429).json({ ok: false, error: 'Too many OTP attempts. Please request a new OTP' });
+  if (attempt.status !== 'ok' || !safeEqual(attempt.otpHash, hashOtp(user.id, otp))) return invalid();
+  const nextUsers = users.map(r => (r && r.id === user.id ? normalizeUserForStorage({ ...r, password }, r) : r));
+  const updatedAt = await saveUsers(collection, nextUsers, 'password-reset');
+  await deleteOtp(user.id);
+  res.json({ ok: true, userId: user.id, loginId: user.loginId, updatedAt });
 }));
 
 module.exports = router;

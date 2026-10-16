@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { useApp } from '../context/AppContext';
 import { Card, Badge, Icon, EvidenceUploader } from '../components/UI';
 import { showToast, SEV_BADGE, SEV_LABEL, fmtDate, mediaUrl, isImageMedia } from '../utils/helpers';
-import { auditFindingCounts, auditScore } from '../utils/dashboardHelpers';
+import { auditFindingCounts, auditScore, sessionAuditFindingEntries, sessionAuditFindingRows } from '../utils/dashboardHelpers';
 import { STD_META, CAPA_DUE_DEFAULTS, EMPTY_SESSION } from '../utils/auditEngine';
 
 function Stars({ n }) {
@@ -161,7 +161,7 @@ export default function Execution() {
   const allQ = secs.flatMap(s => s._checkpoints || []);
   const answered = allQ.filter(q => session.answers[q.id] && session.answers[q.id] !== 'skip').length;
   const skipped = allQ.filter(q => session.answers[q.id] === 'skip').length;
-  const findsCount = Object.keys(session.findings).length;
+  const findsCount = sessionAuditFindingRows(session, audit).length;
   const pct = allQ.length ? Math.round(answered / allQ.length * 100) : 0;
 
   const doAns = (qId, ans) => {
@@ -201,7 +201,8 @@ export default function Execution() {
     const unanswered = allQ.filter(q => !session.answers[q.id]).length;
     if (unanswered > 0) { showToast(`${unanswered} unanswered. Mark N/A or answer all before submitting.`, 4000); return; }
     const submittedAt = new Date().toISOString();
-    const findValues = Object.values(session.findings);
+    const findingEntries = sessionAuditFindingEntries(session, audit);
+    const findValues = findingEntries.map(([, finding]) => finding);
     const auditScoreFrozen = auditScore(findValues);
     const auditFindingCountsFrozen = auditFindingCounts(findValues);
     const capaDue = getCapaDue() || CAPA_DUE_DEFAULTS;
@@ -216,7 +217,7 @@ export default function Execution() {
       return Number.isFinite(n) && n > max ? n : max;
     }, 0) + 1;
     const newFindings = [];
-    Object.entries(session.findings).forEach(([qId, f]) => {
+    findingEntries.forEach(([qId, f]) => {
       const cp = allQ.find(q => q.id === qId);
       const ref = refPrefix + String(nextSeq++).padStart(3, '0');
       newFindings.push({
@@ -230,7 +231,7 @@ export default function Execution() {
         activityLog: [{ user: currentUser?.name || 'Auditor', action: 'Finding logged during ' + audit.deptName + ' audit (' + audit.ref + ')', ts: new Date().toLocaleString() }],
       });
     });
-    const sessionCopy = { answers: { ...session.answers }, findings: { ...session.findings }, notes: { ...session.notes }, genNotes: session.genNotes };
+    const sessionCopy = { answers: { ...session.answers }, findings: Object.fromEntries(findingEntries), notes: { ...session.notes }, genNotes: session.genNotes };
     const completedAudit = { ...audit, status: 'submitted', submittedAt, session: sessionCopy, findingRefs: newFindings.map(f => f.ref), auditScoreFrozen, auditFindingCountsFrozen };
     if (newFindings.length) writeSyncKey('ap_finds', [...existing, ...newFindings], currentUser?.loginId);
     writeSyncKey('ap_completed_audits', [...getCompletedAudits(), completedAudit], currentUser?.loginId);

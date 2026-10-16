@@ -1,75 +1,40 @@
 'use strict';
 
-const crypto = require('crypto');
-const { getCollection } = require('../lib/mongo');
+const { readSessionToken } = require('../lib/authjs');
+const { getCachedUsers, getCachedPermissions, invalidateUsers, invalidatePermissions } = require('../lib/user-store');
+const { cleanIdentity } = require('../lib/identity');
+const { passwordVersion, safeEqual } = require('../lib/password');
 
-const AUTH_SECRET = process.env.AUTH_SECRET || process.env.SESSION_SECRET || crypto.createHash('sha256')
-  .update([(process.env.MONGODB_DB||'onepws_audit'), 'onepws-auditpro-auth-v2'].join('|')).digest('hex');
-const AUTH_TOKEN_TTL_MS = Number(process.env.AUTH_TOKEN_TTL_MS || 7 * 24 * 60 * 60 * 1000);
 const REQUIRED_SYNC_CLIENT = 'AuditPro-Web/2026-07-02-sync-guard-2';
 
-function base64Url(input) { return Buffer.from(input).toString('base64url'); }
-function signText(input) { return crypto.createHmac('sha256', AUTH_SECRET).update(input).digest('base64url'); }
+// Endpoints reachable without a session. Everything under /api/auth/ that Auth.js owns
+// (csrf, session, callback/credentials, signout…) is public by design — Auth.js enforces
+// its own CSRF/credential checks there. The three account routes below need a session.
+const PUBLIC_API_PATHS = new Set(['/api/health', '/api/auth/forgot-password', '/api/auth/reset-password']);
+const SESSION_AUTH_PATHS = new Set(['/api/auth/me', '/api/auth/profile', '/api/auth/admin-reset-password', '/api/auth/verify-password']);
 
-function createAuthToken(user) {
-  const payload = { sub: String(user.id||''), loginId: String(user.loginId||''), role: String(user.role||''), exp: Date.now() + AUTH_TOKEN_TTL_MS };
-  const body = base64Url(JSON.stringify(payload));
-  return `${body}.${signText(body)}`;
-}
-
-function parseAuthToken(token) {
-  const raw = String(token||'').trim();
-  const parts = raw.split('.');
-  if (parts.length !== 2) return null;
-  const expected = signText(parts[0]); const actual = parts[1];
-  if (expected.length !== actual.length) return null;
-  if (!crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(actual))) return null;
-  let payload;
-  try { payload = JSON.parse(Buffer.from(parts[0], 'base64url').toString('utf8')); } catch (_) { return null; }
-  if (!payload || Number(payload.exp||0) < Date.now()) return null;
-  return payload;
-}
-
-function cleanIdentity(input) { return String(input||'').trim().toLowerCase(); }
-
-function findUserByIdentity(users, identity) {
-  const needle = cleanIdentity(identity);
-  if (!needle) return null;
-  return users.find(u => {
-    if (!u || u.active === false) return false;
-    const aliases = Array.isArray(u.legacyLoginIds) ? u.legacyLoginIds : [];
-    return cleanIdentity(u.loginId)===needle || cleanIdentity(u.email)===needle || aliases.some(a=>cleanIdentity(a)===needle);
-  }) || null;
-}
-
-async function getUsersRecord() {
-  const collection = await getCollection();
-  const row = await collection.findOne({ key: 'ap_users' });
-  return { collection, users: Array.isArray(row && row.value) ? row.value : [] };
-}
-
-async function findActiveUserFromToken(req) {
-  const auth = String(req.headers.authorization || '');
-  const token = auth.toLowerCase().startsWith('bearer ') ? auth.slice(7) : String(req.headers['x-auth-token']||'');
-  const payload = parseAuthToken(token);
-  if (!payload) return null;
-  const { users } = await getUsersRecord();
-  return users.find(u => {
-    if (!u || u.active === false) return false;
-    if (String(u.id||'') === String(payload.sub||'')) return true;
-    return cleanIdentity(u.loginId) === cleanIdentity(payload.loginId);
-  }) || null;
+// Resolve the signed-in user from the session cookie. The cookie only proves who the
+// user is; role/active state come from the (briefly cached) user store, and a password
+// change invalidates older cookies via the credential fingerprint.
+async function findActiveUserFromRequest(req) {
+  const token = await readSessionToken(req);
+  if (!token || !token.uid) return null;
+  const users = await getCachedUsers();
+  const user = users.find(u => u && u.active !== false && (String(u.id || '') === String(token.uid) || cleanIdentity(u.loginId) === cleanIdentity(token.loginId)));
+  if (!user) return null;
+  if (!token.pv || !safeEqual(token.pv, passwordVersion(user))) return null;
+  return user;
 }
 
 async function requireApiAuth(req, res, next) {
   if (!req.path.startsWith('/api/')) return next();
-  const publicRoutes = ['/api/health', '/api/auth/login', '/api/auth/forgot-password', '/api/auth/reset-password'];
-  if (publicRoutes.includes(req.path)) return next();
-  const user = await findActiveUserFromToken(req);
+  if (PUBLIC_API_PATHS.has(req.path)) return next();
+  if (req.path.startsWith('/api/auth/') && !SESSION_AUTH_PATHS.has(req.path)) return next();
+  const user = await findActiveUserFromRequest(req);
   if (!user) return res.status(401).json({ ok: false, error: 'Authentication required' });
   req.authUser = user;
   const isSyncPath = req.path === '/api/sync' || req.path.startsWith('/api/sync/');
-  if (isSyncPath && String(req.headers['x-auditpro-client']||'') !== REQUIRED_SYNC_CLIENT) {
+  if (isSyncPath && String(req.headers['x-auditpro-client'] || '') !== REQUIRED_SYNC_CLIENT) {
     res.setHeader('X-AuditPro-Client-Warning', 'refresh-recommended');
   }
   return next();
@@ -83,7 +48,16 @@ function requireAdmin(req) {
   }
 }
 
-// Mirrors client/src/utils/helpers.js DEFAULT_PERMS / loadPermissions — kept in sync
+// Allow only the listed roles (admin always passes through requireRoles via its own entry).
+function requireRoles(req, roles, message) {
+  if (!req.authUser || !roles.includes(req.authUser.role)) {
+    const err = new Error(message || 'You do not have permission to perform this action');
+    err.statusCode = 403;
+    throw err;
+  }
+}
+
+// Mirrors client/src/utils/helpers.js DEFAULT_PERMS / loadPermissions â€” kept in sync
 // manually since client and server don't share a module. Used to enforce the
 // *configurable* per-role page grants server-side (requireAdmin above is for the
 // small set of things that must always be the literal admin role, never grantable).
@@ -113,9 +87,7 @@ function mergePermissions(saved) {
 async function requirePageAccess(req, page) {
   if (!req.authUser) { const err = new Error('Authentication required'); err.statusCode = 401; throw err; }
   if (req.authUser.role === 'admin') return;
-  const collection = await getCollection();
-  const row = await collection.findOne({ key: 'ap_permissions' });
-  const perms = mergePermissions(row && row.value);
+  const perms = mergePermissions(await getCachedPermissions());
   const role = req.authUser.role || 'viewer';
   if (!(perms[role] && perms[role][page])) {
     const err = new Error('You do not have permission to modify this data');
@@ -128,45 +100,13 @@ function wrapAsync(fn) {
   return function (req, res, next) { Promise.resolve(fn(req, res, next)).catch(next); };
 }
 
-function hashPassword(password) {
-  const salt = crypto.randomBytes(16).toString('base64url');
-  const hash = crypto.pbkdf2Sync(String(password), salt, 120000, 32, 'sha256').toString('base64url');
-  return `pbkdf2$120000$${salt}$${hash}`;
-}
-
-function verifyPassword(user, password) {
-  if (!user) return false;
-  const plain = String(password||'');
-  const hashes = [user.passwordHash].concat(Array.isArray(user.legacyPasswordHashes)?user.legacyPasswordHashes:[]);
-  for (const h of hashes) {
-    const stored = String(h||'');
-    if (stored.startsWith('pbkdf2$')) {
-      const parts = stored.split('$');
-      if (parts.length !== 4) continue;
-      const actual = crypto.pbkdf2Sync(plain, parts[2], Number(parts[1]), 32, 'sha256').toString('base64url');
-      if (actual.length === parts[3].length && crypto.timingSafeEqual(Buffer.from(actual), Buffer.from(parts[3]))) return true;
-    }
-  }
-  const legacyPlain = Array.isArray(user.legacyPasswords) ? user.legacyPasswords : [];
-  if (legacyPlain.some(v => String(v||'') === plain)) return true;
-  const stored = String(user.password||'');
-  return stored.length > 0 && stored.length === plain.length && crypto.timingSafeEqual(Buffer.from(stored), Buffer.from(plain));
-}
-
-function publicUser(user) {
-  if (!user || typeof user !== 'object') return user;
-  const copy = { ...user };
-  delete copy.password; delete copy.passwordHash; delete copy.legacyPasswords; delete copy.legacyPasswordHashes;
-  return copy;
-}
-
-function hashOtp(userId, otp) {
-  return crypto.createHash('sha256').update(`${userId}:${otp}:${process.env.SMTP_PASS||'auditpro'}`).digest('hex');
+// Identity recorded in updatedBy/audit fields. Always derived from the session — a
+// client-supplied "by" value must never be trusted for attribution.
+function actorOf(req) {
+  return String((req.authUser && (req.authUser.loginId || req.authUser.id)) || 'system');
 }
 
 module.exports = {
-  AUTH_TOKEN_TTL_MS, createAuthToken, parseAuthToken, cleanIdentity,
-  findUserByIdentity, getUsersRecord, findActiveUserFromToken,
-  requireApiAuth, requireAdmin, requirePageAccess, wrapAsync,
-  hashPassword, verifyPassword, publicUser, hashOtp
+  requireApiAuth, requireAdmin, requireRoles, requirePageAccess, wrapAsync, actorOf,
+  invalidateAuthCaches: () => { invalidateUsers(); invalidatePermissions(); },
 };

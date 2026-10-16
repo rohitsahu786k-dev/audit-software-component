@@ -3,14 +3,17 @@ import { useApp } from '../context/AppContext';
 import { Card, Icon, ConfirmModal } from '../components/UI';
 import { genId, showToast, today, SEV_LABEL, STAT_LABEL } from '../utils/helpers';
 import { normalizeAuditSeverity } from '../utils/dashboardHelpers';
+import { buildExternalAuditImport, EXTERNAL_AUDIT_HEADERS, EXTERNAL_AUDIT_REQUIRED_HEADERS, EXTERNAL_AUDIT_SAMPLE } from '../utils/externalAudit';
 
 const TYPE_HINTS = {
+  external: { cols: EXTERNAL_AUDIT_REQUIRED_HEADERS.join(' > '), note: `Required template structure: ${EXTERNAL_AUDIT_REQUIRED_HEADERS.join(' > ')}. Optional columns: Responsible Owner, Responsible Owner Email, External Audit Name, External Audit Reference, Clause. Imports external audit findings into Findings, CAPA, automated email reminders, dashboards, analytics and reports.` },
   findings: { cols: 'ID, Department, Description, Severity, Clause, DueDate, Status', note: 'Imports old NCs into the Findings Register, CAPA Tracker & Master Tracker.' },
   learnings: { cols: 'Title, Department, Severity, Clause, Root Cause, Preventive Action', note: 'Imports lessons learned into the Learnings Repository for auditor reference.' },
   checkpoints: { cols: 'Question, Clause, Weight (1–5), Type, Department, Tip', note: 'Imported checkpoints automatically appear as an "OnePWS Internal Checkpoints" section in every new audit for the matching department.' },
 };
 
 const TEMPLATE_ROWS = {
+  external: null, // exported as a blank sheet with headings only
   findings: [{ ID: 'STR-2025-001', Department: 'Stores', Description: 'Example finding', Severity: 'major', Clause: '§8.5.2', DueDate: '2025-07-15', Status: 'open' }],
   learnings: [{ Title: 'Example Learning', Department: 'Quality', Severity: 'major', Clause: '§10.2', 'Root Cause': 'Process gap', 'Preventive Action': 'Update SOP' }],
   checkpoints: [{ Question: 'Is process documented?', Clause: '§7.5', Weight: 3, Type: 'Yes/No', Department: 'Production', Tip: 'Check WIs' }],
@@ -36,8 +39,8 @@ function matchDept(depts, dn) {
 }
 
 export default function ImportData() {
-  const { getFindings, getLearnings, getCheckpoints, getDepts, getImportLogs, writeSyncKey, addNotification, currentUser, setPageAction } = useApp();
-  const [importType, setImportType] = useState('findings');
+  const { getFindings, getLearnings, getCheckpoints, getDepts, getUsers, getEmailMaster, getCompletedAudits, getImportLogs, writeSyncKey, writeSyncBulk, addNotification, currentUser, setPageAction } = useApp();
+  const [importType, setImportType] = useState('external');
   const [dragOver, setDragOver] = useState(false);
   const [processing, setProcessing] = useState(false);
   const [log, setLog] = useState(null); // { imported, errors, lines: [] }
@@ -55,7 +58,7 @@ export default function ImportData() {
   const totalErrors = logs.reduce((s, l) => s + (l.errors || 0), 0);
   const lastImport = logs.length ? logs[logs.length - 1].ts : 'Never';
 
-  const processRows = (rows, fname) => {
+  const processRows = async (rows, fname) => {
     const depts = getDepts();
     const now = new Date();
     const nowIso = now.toISOString();
@@ -64,7 +67,50 @@ export default function ImportData() {
     const lines = [];
     const importedIds = [];
 
-    if (importType === 'findings') {
+    let importedAuditIds = [];
+    if (importType === 'external') {
+      const result = buildExternalAuditImport(rows, {
+        depts, users: getUsers(), emailMaster: getEmailMaster(), findings: getFindings(), completed: getCompletedAudits(),
+        fileName: fname, currentUser,
+      });
+      lines.push(...result.errors, ...result.warnings);
+      errors = result.errors.length;
+      if (!result.ok) {
+        setLog({ imported: 0, errors, lines });
+        showToast(`Import cancelled: fix ${errors} invalid row(s) and upload again`, 6000);
+        setProcessing(false);
+        return;
+      }
+      if (!result.findings.length) {
+        setLog({ imported: 0, errors: 0, lines });
+        showToast('Nothing imported - every row is already in the portal', 5000);
+        setProcessing(false);
+        return;
+      }
+      imported = result.findings.length;
+      importedIds.push(...result.findings.map(f => f.id));
+      importedAuditIds = result.audits.map(a => a.id);
+      const okLines = result.findings.map(f => ({ rn: f.importRow, kind: 'ok', msg: `${f.ref} imported for ${f.deptName}` }));
+      const allLines = [...okLines, ...lines];
+      const logEntry = { ts: nowText, createdAt: nowIso, fname, type: importType, count: imported, errors, details: allLines, importedIds, importedAuditIds };
+      try {
+        await writeSyncBulk({
+          ap_finds: [...getFindings(), ...result.findings],
+          ap_completed_audits: [...getCompletedAudits(), ...result.audits],
+          ap_import_logs: [...getImportLogs(), logEntry],
+        }, currentUser?.loginId);
+      } catch (err) {
+        setLog({ imported: 0, errors: 1, lines: [{ rn: 0, kind: 'error', msg: `Save failed, nothing was imported: ${err.message}` }] });
+        showToast(`Import failed: ${err.message}`, 6000);
+        setProcessing(false);
+        return;
+      }
+      setLog({ imported, errors, lines: allLines });
+      addNotification('audit', 'External Audit Imported', `${imported} finding(s) from ${fname} are now active in CAPA and reporting.`, 'capa', ['admin', 'auditor', 'spoc', 'manager']);
+      showToast(`${imported} external finding(s) imported; ${result.warnings.filter(w => /Duplicate/.test(w.msg)).length} duplicate(s) skipped`, 5000);
+      setProcessing(false);
+      return;
+    } else if (importType === 'findings') {
       const findings = getFindings().slice();
       rows.forEach((row, i) => {
         const rn = i + 2;
@@ -154,14 +200,14 @@ export default function ImportData() {
     if (!window.XLSX) { showToast('Excel library loading, retry in 2s.'); return; }
     setProcessing(true);
     const reader = new FileReader();
-    reader.onload = (e) => {
+    reader.onload = async (e) => {
       try {
-        const wb = window.XLSX.read(e.target.result, { type: 'array' });
+        const wb = window.XLSX.read(e.target.result, { type: 'array', cellDates: false });
         const ws = wb.Sheets[wb.SheetNames[0]];
         const rows = window.XLSX.utils.sheet_to_json(ws, { defval: '' });
-        processRows(rows, file.name);
+        await processRows(rows, file.name);
       } catch (err) {
-        showToast(err.message, 5000);
+        showToast(err.message || 'Import failed', 5000);
         setProcessing(false);
       }
     };
@@ -185,9 +231,36 @@ export default function ImportData() {
     if (!window.XLSX) { showToast('Excel loading...'); return; }
     const data = TEMPLATE_ROWS[importType];
     const fname = `OnePWS_${importType[0].toUpperCase()}${importType.slice(1)}_Template.xlsx`;
-    const ws = window.XLSX.utils.json_to_sheet(data);
+    const ws = importType === 'external'
+      ? window.XLSX.utils.aoa_to_sheet([EXTERNAL_AUDIT_HEADERS])
+      : window.XLSX.utils.json_to_sheet(data);
     const wb = window.XLSX.utils.book_new();
-    window.XLSX.utils.book_append_sheet(wb, ws, 'Template');
+    window.XLSX.utils.book_append_sheet(wb, ws, importType === 'external' ? 'External Audit Findings' : 'Template');
+    if (importType === 'external') {
+      ws['!cols'] = EXTERNAL_AUDIT_HEADERS.map(header => ({ wch: Math.max(16, Math.min(40, header.length + 6)) }));
+      const sample = EXTERNAL_AUDIT_SAMPLE[0];
+      const guide = window.XLSX.utils.aoa_to_sheet([
+        ['External Audit Import Instructions'],
+        [],
+        ['1', 'Fill the first sheet (External Audit Findings) from row 2. Do not rename, reorder or delete the column headings.'],
+        ['2', `Required columns: ${EXTERNAL_AUDIT_REQUIRED_HEADERS.join(', ')}.`],
+        ['3', 'Optional columns: Responsible Owner, Responsible Owner Email, External Audit Name, External Audit Reference, Clause. If the owner is blank the department SPOC is assigned.'],
+        ['4', 'Department must match a Department Master name or code (see the list below).'],
+        ['5', 'Dates: DD/MM/YYYY or YYYY-MM-DD (or real Excel dates). Target Closure Date cannot be before Date of Audit.'],
+        ['6', 'NC Type: Critical, Major, Minor or Observation. Status: Open, In Progress, Delayed, Pending Closure or Closed (blank = Open).'],
+        ['7', 'Use the same External Audit Reference for all rows of one audit report. If blank, one is generated from the audit date.'],
+        ['8', 'If any row is invalid the whole file is rejected with row-wise errors; re-importing the same finding is skipped as a duplicate.'],
+        [],
+        ['Example row (do not copy into the data sheet unchanged)'],
+        EXTERNAL_AUDIT_HEADERS,
+        EXTERNAL_AUDIT_HEADERS.map(h => sample[h] ?? ''),
+        [],
+        ['Valid departments (Department Master)'],
+        ...getDepts().map(d => [d.code, d.name]),
+      ]);
+      guide['!cols'] = [{ wch: 16 }, { wch: 110 }];
+      window.XLSX.utils.book_append_sheet(wb, guide, 'Instructions');
+    }
     window.XLSX.writeFile(wb, fname);
     showToast('Template downloaded!');
   };
@@ -207,11 +280,33 @@ export default function ImportData() {
   const deleteLog = (idx) => {
     const l = logs[idx];
     if (!l) return;
+    // Findings and completed audits are merged server-side (records absent from a write are
+    // kept), so a rollback must soft-delete (tombstone) them rather than filter them out.
+    const nowIso = new Date().toISOString();
+    const tombstone = (item) => ({ ...item, deletedAt: nowIso, updatedAt: nowIso });
     if (l.importedIds && l.importedIds.length) {
       if (l.type === 'checkpoints') {
         writeSyncKey('ap_cps', getCheckpoints().filter(cp => !l.importedIds.includes(cp.id)));
       } else if (l.type === 'findings') {
-        writeSyncKey('ap_finds', getFindings().filter(f => !l.importedIds.includes(f.id)));
+        writeSyncKey('ap_finds', getFindings().map(f => l.importedIds.includes(f.id) ? tombstone(f) : f));
+      } else if (l.type === 'external') {
+        const removedIds = new Set(l.importedIds);
+        const nextFindings = getFindings().map(f => removedIds.has(f.id) ? tombstone(f) : f);
+        const auditIds = new Set(l.importedAuditIds || []);
+        const nextAudits = getCompletedAudits().map(a => {
+          if (!auditIds.has(a.id)) return a;
+          const stillLinked = nextFindings.some(f => !f.deletedAt && f.externalAudit && f.auditRef === a.auditRef && f.dept === a.dept);
+          return stillLinked ? a : tombstone(a);
+        });
+        writeSyncBulk({
+          ap_finds: nextFindings,
+          ap_completed_audits: nextAudits,
+          ap_import_logs: logs.filter((_, i) => i !== idx),
+        }, currentUser?.loginId)
+          .then(() => showToast('Import rolled back', 4000))
+          .catch(err => showToast(err.message, 5000));
+        setConfirmDeleteIdx(null);
+        return;
       } else if (l.type === 'learnings') {
         writeSyncKey('ap_learns', getLearnings().filter(x => !l.importedIds.includes(x.id)));
       }
@@ -225,9 +320,9 @@ export default function ImportData() {
   const exportImported = () => {
     if (!window.XLSX) { showToast('Excel loading...'); return; }
     const wb = window.XLSX.utils.book_new();
-    const impFindings = getFindings().filter(f => f.type === 'imported');
+    const impFindings = getFindings().filter(f => f.type === 'imported' || f.type === 'external-audit');
     if (impFindings.length) {
-      const ws = window.XLSX.utils.json_to_sheet(impFindings.map(f => ({ ID: f.ref, Dept: f.deptName, Description: f.desc, Severity: SEV_LABEL[f.sev], Clause: f.clause, Status: STAT_LABEL[f.status] })));
+      const ws = window.XLSX.utils.json_to_sheet(impFindings.map(f => ({ ID: f.ref, Source: f.externalAudit ? 'External Audit' : 'Historical Import', 'Audit Reference': f.auditRef || '', 'Audit Date': f.auditDate || '', Dept: f.deptName, Topic: f.topic || '', Description: f.desc, Severity: SEV_LABEL[f.sev], Owner: f.responsibleOwner || '', 'Owner Email': f.ownerEmail || '', Due: f.due, Clause: f.clause, Status: STAT_LABEL[f.status] })));
       window.XLSX.utils.book_append_sheet(wb, ws, 'Imported Findings');
     }
     const impCps = getCheckpoints().filter(c => String(c.id || '').startsWith('cpimp'));
@@ -267,6 +362,7 @@ export default function ImportData() {
             <div>
               <label className="lbl text-[11px] font-bold block mb-1">Import Type</label>
               <select className="w-full" value={importType} onChange={(e) => setImportType(e.target.value)}>
+                <option value="external">External Audit Findings (full portal integration)</option>
                 <option value="findings">Findings / Historical Non-conformances</option>
                 <option value="learnings">Audit Learnings</option>
                 <option value="checkpoints">Custom Checkpoints (appear in new audits)</option>
@@ -327,7 +423,7 @@ export default function ImportData() {
 
       <ConfirmModal
         open={confirmDeleteIdx !== null}
-        message="Delete this import log and remove its records from the app? (Completed audit reports will not be affected)"
+        message="Delete this import and its linked records? External audit reports and score contribution from this import will also be removed."
         onConfirm={() => deleteLog(confirmDeleteIdx)}
         onCancel={() => setConfirmDeleteIdx(null)}
       />

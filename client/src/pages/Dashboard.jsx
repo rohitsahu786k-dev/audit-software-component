@@ -16,7 +16,10 @@ import {
   completedAuditsSorted,
   deptRecordForValue,
   deptValuesMatch,
-  normalizeAuditSeverity
+  findingMatchesDeptCode,
+  normalizeAuditSeverity,
+  deptToken,
+  delayDays
 } from '../utils/dashboardHelpers';
 
 export default function Dashboard({ dateFrom, dateTo }) {
@@ -53,21 +56,34 @@ export default function Dashboard({ dateFrom, dateTo }) {
     const role = currentUser?.role || 'viewer';
     const dept = currentUser?.dept || '';
     if (role === 'spoc') {
-      list = list.filter(f => f.dept === dept);
+      list = list.filter(f => findingMatchesDeptCode(depts, f, dept));
     }
     return list;
-  }, [rawFindings, dateFrom, dateTo, currentUser]);
+  }, [rawFindings, dateFrom, dateTo, currentUser, depts]);
 
   const open = useMemo(() => F.filter(f => f.status !== 'closed').length, [F]);
 
   const visibleDepts = useMemo(() => {
     const role = currentUser?.role || 'viewer';
     const dept = currentUser?.dept || '';
+    let list = depts;
     if (role === 'spoc') {
-      return depts.filter(d => d.code === dept);
+      list = depts.filter(d => deptValuesMatch(depts, d.code, dept) || deptValuesMatch(depts, d.name, dept));
     }
-    return depts;
-  }, [depts, currentUser]);
+    const byAlias = new Map();
+    list.forEach(d => {
+      const key = deptToken(d.name) || deptToken(d.code);
+      const prev = byAlias.get(key);
+      if (!prev) {
+        byAlias.set(key, d);
+      } else {
+        const hasFindings = rawFindings.some(f => f.dept === d.code || f.deptName === d.name);
+        const prevHasFindings = rawFindings.some(f => f.dept === prev.code || f.deptName === prev.name);
+        if (hasFindings && !prevHasFindings) byAlias.set(key, d);
+      }
+    });
+    return [...byAlias.values()];
+  }, [depts, currentUser, rawFindings]);
 
   const overallAuditScore = useMemo(() => {
     return orgLatestAuditScore(completed, rawFindings, visibleDepts);
@@ -84,12 +100,14 @@ export default function Dashboard({ dateFrom, dateTo }) {
         const ws = String(f.status || '').toLowerCase();
         return ws === 'in-progress' || ws === 'pending-closure' || ws === 'open';
       }).length;
+      const delayed = df.filter(f => f.status !== 'closed' && (f.status === 'delayed' || delayDays(f) > 0)).length;
       return {
         name: d.name,
         score,
         scoreInfo,
         findings: df.length,
         open: df.filter(f => f.status !== 'closed').length,
+        delayed,
         inprog,
         closed,
         cr: closureRate(df),
@@ -306,6 +324,7 @@ export default function Dashboard({ dateFrom, dateTo }) {
                       <th>Department</th>
                       <th>Total</th>
                       <th style={{ color: 'var(--red)' }}>Open</th>
+                      <th style={{ color: 'var(--red)' }}>Delayed</th>
                       <th style={{ color: 'var(--amber)' }}>In Process</th>
                       <th style={{ color: 'var(--green)' }}>Closed</th>
                       <th>Audit Score</th>
@@ -320,6 +339,9 @@ export default function Dashboard({ dateFrom, dateTo }) {
                         <td className="font-bold text-[var(--text)]">{d.name}</td>
                         <td className="font-bold">{d.findings}</td>
                         <td style={{ color: 'var(--red)', fontWeight: d.open ? 800 : 400 }}>{d.open || '—'}</td>
+                        <td style={{ color: 'var(--red)', fontWeight: d.delayed ? 800 : 400 }}>
+                          {d.delayed ? <span className="badge b-red" style={{ padding: '2px 7px', fontSize: 11, fontWeight: 800 }}>{d.delayed}</span> : '—'}
+                        </td>
                         <td style={{ color: 'var(--amber)', fontWeight: d.inprog ? 800 : 400 }}>{d.inprog || '—'}</td>
                         <td style={{ color: 'var(--green)', fontWeight: d.closed ? 800 : 400 }}>{d.closed || '—'}</td>
                         <td style={{ color: auditScoreColor(d.score), fontWeight: 800 }}>
@@ -352,6 +374,13 @@ export default function Dashboard({ dateFrom, dateTo }) {
                       <td>TOTAL</td>
                       <td>{activeDeptScores.reduce((s, d) => s + d.findings, 0)}</td>
                       <td style={{ color: 'var(--red)' }}>{activeDeptScores.reduce((s, d) => s + d.open, 0)}</td>
+                      <td style={{ color: 'var(--red)' }}>
+                        {activeDeptScores.reduce((s, d) => s + d.delayed, 0) ? (
+                          <span className="badge b-red" style={{ padding: '2px 7px', fontSize: 11, fontWeight: 800 }}>
+                            {activeDeptScores.reduce((s, d) => s + d.delayed, 0)}
+                          </span>
+                        ) : '—'}
+                      </td>
                       <td style={{ color: 'var(--amber)' }}>{activeDeptScores.reduce((s, d) => s + d.inprog, 0)}</td>
                       <td style={{ color: 'var(--green)' }}>{activeDeptScores.reduce((s, d) => s + d.closed, 0)}</td>
                       <td style={{ color: 'var(--brand)' }}>{overallAuditScore === null ? 'N/A' : `${overallAuditScore}%`}</td>

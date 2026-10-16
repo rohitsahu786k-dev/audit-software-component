@@ -5,3 +5,6 @@ npm-debug.log*
 auditpro-server*.log
 ONEPWS_Backup_*.json
 backups/
+
+.vercel
+.env*

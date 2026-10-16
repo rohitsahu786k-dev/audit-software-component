@@ -9,15 +9,15 @@ export const EMAIL_RULES_DEFAULTS = {
   ccHod: true,
   ccGlobal: true,
   types: { upcoming_reminder: true, delayed: true, escalation: true },
-  frequencies: { upcoming_reminder: 1, delayed: 3, escalation_2: 2, escalation_3: 30 },
+  frequencies: { upcoming_reminder: 365, delayed: 1, escalation_2: 2, escalation_3: 30 },
   suppressed: [],
   depts: {},
 };
 
 // The three switchable email types. `escalation` covers both escalation levels.
 export const EMAIL_TYPES = [
-  { key: 'upcoming_reminder', label: 'Upcoming Reminder', desc: 'Sent to the SPOC before the target date', to: 'SPOC' },
-  { key: 'delayed', label: 'Delayed NC', desc: 'Sent once an NC is overdue', to: 'SPOC' },
+  { key: 'upcoming_reminder', label: 'Upcoming Reminder', desc: 'Sent once when the target date is 0-2 days away', to: 'SPOC' },
+  { key: 'delayed', label: 'Delayed NC', desc: 'Sent on delay days 0, 3 and 6', to: 'SPOC' },
   { key: 'escalation', label: 'Escalation', desc: 'Overdue 7d+ goes to the HOD; 15d+ adds Management', to: 'HOD' },
 ];
 
