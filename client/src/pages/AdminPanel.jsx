@@ -84,6 +84,7 @@ export default function AdminPanel() {
   // ── USERS ──────────────────────────────────────────
   const handleSave = () => {
     if (!editItem.loginId || !editItem.role) { showToast('Please fill all required fields'); return; }
+    if (editItem.role === 'spoc' && !editItem.dept) { showToast('Select a department for the Dept SPOC'); return; }
     if (!editItem.id && !editItem.password) { showToast('Password required for new user'); return; }
     const current = getUsers();
     const conflict = current.find(u => u.loginId === editItem.loginId && u.id !== editItem.id);
@@ -368,7 +369,14 @@ export default function AdminPanel() {
                   {Object.entries(ROLE_LABELS).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
                 </select>
               </div>
-              <div><label className="form-label">Dept</label><input value={editItem.dept} onChange={e => setEditItem(p => ({ ...p, dept: e.target.value }))} placeholder="E.g. DES, QA" /></div>
+              <div>
+                <label className="form-label">Dept{editItem.role === 'spoc' ? ' *' : ''}</label>
+                <select value={editItem.dept || ''} onChange={e => setEditItem(p => ({ ...p, dept: e.target.value }))}>
+                  <option value="">— Select department —</option>
+                  {getDepts().map(d => <option key={d.code} value={d.code}>{d.code} — {d.name}</option>)}
+                  {editItem.dept && !getDepts().some(d => d.code === editItem.dept) && <option value={editItem.dept}>{editItem.dept} (not in Master Library)</option>}
+                </select>
+              </div>
             </div>
             <div className="mb-2"><label className="form-label">Email *</label><input value={editItem.email} onChange={e => setEditItem(p => ({ ...p, email: e.target.value }))} placeholder="user@company.com" /></div>
             <div className="mb-3">

@@ -36,8 +36,8 @@ export default function CAPA({ dateFrom, dateTo }) {
   const [editModal, setEditModal] = useState(null);
   const [closureEv, setClosureEv] = useState('');
   const [closureFiles, setClosureFiles] = useState([]);
-  const [decision, setDecision] = useState('accept');
   const [decisionComments, setDecisionComments] = useState('');
+  const [reviewDate, setReviewDate] = useState(today());
 
   // permissions
   const canEditStatus = role === 'admin' || role === 'auditor' || role === 'spoc';
@@ -94,7 +94,7 @@ export default function CAPA({ dateFrom, dateTo }) {
   const onStatusChange = (f, status) => {
     if (status === findingWorkflowStatus(f)) return;
     if (status === 'pending-closure') { if (canSubmitClosure) { setClosureModal(f); setClosureEv(f.closureEvidence || ''); setClosureFiles(f.closureFiles || []); } else showToast('Add closure evidence to submit for review'); return; }
-    if (status === 'closed' && findingWorkflowStatus(f) === 'pending-closure') { setReviewModal(f); setDecision('accept'); setDecisionComments(''); return; }
+    if (status === 'closed' && findingWorkflowStatus(f) === 'pending-closure') { setReviewModal(f); setDecisionComments(''); setReviewDate(today()); return; }
     if (status === 'closed' && role !== 'admin') { showToast('Only Master Admin can force close without review'); return; }
     applyStatus(f, status);
   };
@@ -120,12 +120,15 @@ export default function CAPA({ dateFrom, dateTo }) {
     setClosureModal(null); setClosureEv(''); setClosureFiles([]);
   };
 
-  const submitReview = () => {
-    const accept = decision === 'accept';
+  const submitReview = (verdict) => {
+    const accept = verdict === 'accept';
+    if (!accept && !decisionComments.trim()) { showToast('Add review comments explaining the rejection'); return; }
+    if (accept && !reviewDate) { showToast('Select the audit closure date'); return; }
     // A rejected closure goes back to In Progress (not Open) so the SPOC can revise and
     // resubmit; capaStatus must move off 'submitted' or the finding stays on "Submit For Review".
     const nextStatus = accept ? 'closed' : 'in-progress';
-    commit(x => ({ ...x, status: nextStatus, capaStatus: nextStatus, decision, decisionComments: decisionComments.trim(), decisionDate: today(), decisionAt: new Date().toISOString(), auditClosureDate: accept ? today() : null, closedAt: accept ? new Date().toISOString() : null, updatedAt: new Date().toISOString(), statusChangedAt: new Date().toISOString(), activityLog: [...(x.activityLog || []), { user: currentUser?.name || 'System', action: accept ? 'Closure accepted' : 'Closure rejected — reopened for resubmission', ts: nowStamp() }] }), accept ? 'CAPA closed' : 'Closure rejected — back to In Progress');
+    const comment = decisionComments.trim();
+    commit(x => ({ ...x, status: nextStatus, capaStatus: nextStatus, decision: verdict, decisionComments: comment, decisionDate: today(), decisionAt: new Date().toISOString(), auditClosureDate: accept ? reviewDate : null, closedAt: accept ? new Date(reviewDate + 'T00:00:00').toISOString() : null, updatedAt: new Date().toISOString(), statusChangedAt: new Date().toISOString(), activityLog: [...(x.activityLog || []), { user: currentUser?.name || 'System', action: (accept ? 'Closure accepted' : 'Closure rejected — reopened for resubmission') + (comment ? ': ' + comment : ''), ts: nowStamp() }] }), accept ? 'CAPA closed' : 'Closure rejected — back to In Progress');
     setReviewModal(null); setDecisionComments('');
   };
 
@@ -224,7 +227,7 @@ export default function CAPA({ dateFrom, dateTo }) {
           {canEditRecord(f) && <button className="btn btn-primary btn-sm" onClick={() => setEditModal({ ...f })}>Edit Finding</button>}
           {canDeleteRecord(f) && <button className="btn btn-danger btn-sm" onClick={() => deleteFinding(f)}>Delete</button>}
           {canSubmitClosure && ws !== 'closed' && ws !== 'pending-closure' && <button className="btn btn-success btn-sm" onClick={() => { setClosureModal(f); setClosureEv(f.closureEvidence || ''); setClosureFiles(f.closureFiles || []); }}>Submit For Review</button>}
-          {canReview && ws === 'pending-closure' && <button className="btn btn-primary btn-sm" onClick={() => { setReviewModal(f); setDecision('accept'); setDecisionComments(''); }}>Review Closure</button>}
+          {canReview && ws === 'pending-closure' && <button className="btn btn-primary btn-sm" onClick={() => { setReviewModal(f); setDecisionComments(''); setReviewDate(today()); }}>Review Closure</button>}
           {role === 'admin' && ws !== 'closed' && ws !== 'pending-closure' && <button className="btn btn-amber btn-sm" onClick={() => applyStatus(f, 'closed')}>Force Close</button>}
           {ws === 'closed' && <Badge type="b-green">Verified &amp; Closed</Badge>}
           <button className="btn btn-ghost btn-sm" onClick={() => showToast('Reminder email dispatch is handled by the server email service')}><Icon name="mail" /> Remind</button>
@@ -301,19 +304,55 @@ export default function CAPA({ dateFrom, dateTo }) {
       )}
 
       {/* Review modal */}
-      {reviewModal && (
-        <div className="modal-bg" onClick={() => setReviewModal(null)}>
-          <div className="modal-box" onClick={e => e.stopPropagation()}>
-            <div className="modal-header"><span>Review Closure — {reviewModal.ref}</span><button className="btn btn-ghost btn-icon btn-sm" onClick={() => setReviewModal(null)}><Icon name="x" /></button></div>
-            {reviewModal.closureEvidence && <div className="mb-2 p-2 rounded text-xs" style={{ background: 'var(--bg3)' }}>{reviewModal.closureEvidence}</div>}
-            <div className="mb-2"><label className="form-label">Decision</label>
-              <select value={decision} onChange={e => setDecision(e.target.value)}><option value="accept">Accept &amp; Close</option><option value="reject">Reject &amp; Reopen</option></select>
-            </div>
-            <div className="mb-3"><label className="form-label">Comments</label><textarea value={decisionComments} onChange={e => setDecisionComments(e.target.value)} style={{ height: 60, resize: 'none' }} /></div>
-            <div className="flex gap-2"><button className="btn btn-ghost flex-1" onClick={() => setReviewModal(null)}>Cancel</button><button className="btn btn-primary flex-1" onClick={submitReview}>Submit Decision</button></div>
+      {reviewModal && (() => {
+        const rf = reviewModal;
+        const before = rf.evidenceFiles || [];
+        const after = rf.closureFiles || [];
+        const Gallery = ({ files, label }) => (
+          <div className="rounded-lg p-2" style={{ border: '1px solid var(--border)', background: 'var(--bg)' }}>
+            <div className="text-[10px] font-bold text-center mb-1" style={{ color: 'var(--text3)' }}>{label}</div>
+            {files.length === 0 ? (
+              <div className="flex items-center justify-center text-[11px]" style={{ height: 70, color: 'var(--text3)' }}>No file attached</div>
+            ) : (
+              <div className="flex flex-wrap gap-2 justify-center">
+                {files.map((cf, i) => (
+                  <a key={i} href={mediaUrl(cf)} target="_blank" rel="noreferrer" className="flex flex-col items-center gap-1" style={{ width: 90 }}>
+                    {isImageMedia(cf) ? (
+                      <img src={mediaUrl(cf)} alt={cf.file_name || cf.name} style={{ width: 90, height: 70, objectFit: 'cover', borderRadius: 6, border: '1px solid var(--border)' }} />
+                    ) : (
+                      <div className="flex items-center justify-center" style={{ width: 90, height: 70, borderRadius: 6, background: 'var(--bg3)', border: '1px solid var(--border)' }}><Icon name="file-text" className="w-5 h-5 opacity-50" /></div>
+                    )}
+                    <span className="text-[9px] truncate w-full text-center" style={{ color: 'var(--text3)' }}>{cf.file_name || cf.name}</span>
+                  </a>
+                ))}
+              </div>
+            )}
           </div>
-        </div>
-      )}
+        );
+        return (
+          <div className="modal-bg" onClick={() => setReviewModal(null)}>
+            <div className="modal-box" style={{ maxHeight: '90vh', overflowY: 'auto' }} onClick={e => e.stopPropagation()}>
+              <div className="modal-header"><span>Review Closure</span><button className="btn btn-ghost btn-icon btn-sm" onClick={() => setReviewModal(null)}><Icon name="x" /></button></div>
+              <div className="mb-3 p-3 rounded-lg" style={{ background: 'var(--bg3)' }}>
+                <div className="text-xs font-bold">{rf.ref}: {sanitize(rf.desc || '')}</div>
+                <div className="text-[10px] mt-1" style={{ color: 'var(--text3)' }}>By {rf.closureSubmittedBy || '—'} · {rf.closureDate || '—'}</div>
+                <div className="text-[11px] font-bold mt-2">Closure Remarks / Evidence:</div>
+                <div className="text-[11px] mt-1" style={{ color: 'var(--text2)', whiteSpace: 'pre-wrap' }}>{rf.closureEvidence ? sanitize(rf.closureEvidence) : 'No remarks submitted'}</div>
+                <div className="grid grid-cols-2 gap-2 mt-3">
+                  <Gallery files={before} label="BEFORE (Finding Evidence)" />
+                  <Gallery files={after} label="AFTER (Closure Evidence)" />
+                </div>
+              </div>
+              <div className="mb-2"><label className="form-label">Audit Closure Date *</label><input type="date" value={reviewDate} onChange={e => setReviewDate(e.target.value)} /></div>
+              <div className="mb-3"><label className="form-label">Auditor Comments</label><textarea value={decisionComments} onChange={e => setDecisionComments(e.target.value)} style={{ height: 60, resize: 'none' }} placeholder="Add review comments (required to reject)..." /></div>
+              <div className="flex gap-2">
+                <button className="btn btn-danger flex-1" onClick={() => submitReview('reject')}><Icon name="x" /> Reject &amp; Reopen</button>
+                <button className="btn btn-success flex-1" onClick={() => submitReview('accept')}><Icon name="check" /> Accept &amp; Close</button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* Edit finding modal */}
       {editModal && (

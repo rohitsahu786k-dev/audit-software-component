@@ -1,6 +1,7 @@
 import React, { useState, useMemo, useEffect, useRef, useCallback } from 'react';
 import { useApp } from '../context/AppContext';
 import { Card, Badge, EmptyState, Icon } from '../components/UI';
+import { buildAuditReportPdf } from '../utils/auditReportPdf';
 import { SEV_BADGE, SEV_LABEL, STAT_BADGE, STAT_LABEL, sanitize, showToast } from '../utils/helpers';
 import {
   auditFindingCounts, latestDeptAudit, latestDeptAuditScore,
@@ -102,35 +103,14 @@ export default function Reports({ dateFrom, dateTo }) {
 
   const genDeptPDF = (d) => {
     if (!window.jspdf) { showToast('PDF loading...'); return; }
-    const { jsPDF } = window.jspdf;
-    const doc = new jsPDF();
-    const pw = doc.internal.pageSize.getWidth();
-    const { counts, score, internalScore, externalScore } = cardData(d);
-    const df = deptFindings(d.code);
-    const hasExternal = externalScore !== null || df.some(f => f.externalAudit);
-    doc.setFillColor(192, 57, 43); doc.rect(0, 0, pw, 28, 'F');
-    doc.setTextColor(255); doc.setFontSize(15); doc.setFont('helvetica', 'bold');
-    doc.text('OnePWS Pvt. Ltd.', pw / 2, 11, { align: 'center' });
-    doc.setFontSize(9); doc.setFont('helvetica', 'normal');
-    doc.text((hasExternal ? 'Quality Audit Report (On-portal + External) — ' : 'Internal Quality Audit Report — ') + d.name, pw / 2, 18, { align: 'center' });
-    doc.setFontSize(7);
-    doc.text('SPOC: ' + (d.spoc || 'TBD') + ' | Date: ' + new Date().toLocaleDateString() + ' | Standards: ' + activeStdLabel, pw / 2, 24, { align: 'center' });
-    doc.setTextColor(30, 30, 50);
-    doc.autoTable({
-      startY: 34, head: [['Audit Score', 'On-portal', 'External', 'Critical', 'Major', 'Minor', 'Observation']],
-      body: [[score === null ? 'N/A' : score + '%', internalScore === null ? '-' : internalScore + '%', externalScore === null ? '-' : externalScore + '%', counts.critical, counts.major, counts.minor, counts.obs]],
-      styles: { fontSize: 9, halign: 'center' }, headStyles: { fillColor: [37, 99, 235], textColor: 255 }, margin: { left: 14, right: 14 },
-    });
-    if (internalScore !== null && externalScore !== null) {
-      doc.setFontSize(7); doc.setTextColor(90);
-      doc.text('Audit Score = average of the latest on-portal audit score and the latest imported external audit score.', 14, doc.lastAutoTable.finalY + 5);
-      doc.setTextColor(30, 30, 50);
-    }
-    doc.autoTable({
-      startY: doc.lastAutoTable.finalY + 9, head: [['ID', 'Source', 'Description', 'Severity', 'Owner', 'Due', 'Status']],
-      body: df.map(f => [f.ref, f.externalAudit ? 'External' + (f.auditRef ? ' (' + f.auditRef + ')' : '') : 'On-portal', f.desc, SEV_LABEL[f.sev] || f.sev, f.responsibleOwner || '-', f.due || '-', STAT_LABEL[f.status] || f.status]),
-      styles: { fontSize: 7.5 }, headStyles: { fillColor: [192, 57, 43], textColor: 255 }, margin: { left: 14, right: 14 },
-    });
+    const { counts, score } = cardData(d);
+    const audit = latestDeptAudit(completed, allFindings, depts, d.code);
+    let df = deptFindings(d.code);
+    // Scope the finding list to the audit the report is about (matches the checklist and score tiles).
+    const refs = audit && Array.isArray(audit.findingRefs) ? new Set(audit.findingRefs) : null;
+    if (refs && refs.size) df = df.filter(f => refs.has(f.ref));
+    const hasExternal = df.some(f => f.externalAudit) || (audit && audit.externalAudit);
+    const doc = buildAuditReportPdf(window.jspdf.jsPDF, { dept: d, audit, score, counts, findings: df, standardsLabel: activeStdLabel, hasExternal });
     doc.save('OnePWS_' + d.code + '_Report_' + Date.now() + '.pdf');
     showToast('PDF downloaded');
   };
